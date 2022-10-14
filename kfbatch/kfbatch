@@ -1,0 +1,37 @@
+#!/usr/bin/env python
+
+import argparse
+from distutils.util import strtobool
+
+# Main parser
+parser = argparse.ArgumentParser(description='A toolkit for the batch job management.')
+subparsers = parser.add_subparsers()
+
+
+def command_stat(args):
+    from kfbatch.stat import stat_main
+    stat_main(args)
+pstat = subparsers.add_parser('stat', help='Return availability of clusters', parents=[])
+pstat.add_argument('--stat_command', metavar='command', default='qstat -F', type=str, required=False, action='store',
+                   choices=['qstat -F',],
+                   help='default=%(default)s: PATH to the command that shows cluster-wide batch job status.')
+pstat.add_argument('--example_file', metavar='PATH', default='', type=str, required=False, action='store',
+                   help='default=%(default)s: PATH to a file with --stat_command stdout. '
+                   'Only for demo and debugging.')
+pstat.add_argument('--out', metavar='PATH', default='', type=str, required=False, action='store',
+                   help='default=%(default)s: Save the full table if specified.')
+pstat.set_defaults(handler=command_stat)
+
+def command_help(args):
+    print(parser.parse_args([args.command, '--help']))
+parser_help = subparsers.add_parser('help', help='Show help messages')
+parser_help.add_argument('command', help='command name which help is shown')
+parser_help.set_defaults(handler=command_help)
+
+
+# Handler
+args = parser.parse_args()
+if hasattr(args, 'handler'):
+    args.handler(args)
+else:
+    parser.print_help()
