@@ -37,10 +37,10 @@ def get_qstat_df(lines):
             key = re.sub('=.*', '', key)
             value = re.sub('.*=', '', line)
             node_params[key] = value
-    df = df.sort_values(by='queue_name').reset_index(drop=True)
     for col in ['ncore_resv','ncore_used','ncore_total']:
         df.loc[:,col] = df.loc[:,col].astype(int)
     df.loc[:,'ncore_available'] = df['ncore_total'] - df['ncore_used'] - df['ncore_resv']
+    df = df.sort_values(by=['queue_name','node_name']).reset_index(drop=True)
     return df
 
 def print_stats(df):
@@ -56,7 +56,7 @@ def print_stats(df):
             txt += ' with the status {}'
         print(txt.format(queue_name, num_avail_cpu, avail_ram, ram_unit, node_name, node_status))
 
-def print_resource_availability(df):
+def print_resource_availability(df, args):
     df.loc[:,'hc:mem_req_unit'] = df.loc[:,'hc:mem_req'].str.replace(r'^[\.0-9]+([A-Z]*)$', r'\1', regex=True).fillna('')
     df.loc[:,'hc:mem_req'] = df.loc[:,'hc:mem_req'].str.replace('[A-Z]$', '', regex=True).astype(float)
     queue_names = df.loc[:,'queue_name'].unique()
@@ -66,26 +66,33 @@ def print_resource_availability(df):
         for queue_name in queue_names:
             df_queue = df.loc[(df['queue_name']==queue_name),:]
             descending_values = df_queue[col].sort_values(ascending=False)
-            third_value = descending_values.iloc[min(2, descending_values.shape[0]-1)]
-            df_top_available_ram = df_queue.loc[(df_queue[col]>=third_value),:]
+            threshold_value = descending_values.iloc[min(args.ntop-1, descending_values.shape[0]-1)]
+            df_top_available_ram = df_queue.loc[(df_queue[col]>=threshold_value),:]
             df_top_available_ram = df_top_available_ram.sort_values(by=col, ascending=False).reset_index(drop=True)
             print_stats(df=df_top_available_ram)
         print('')
 
 def stat_main(args):
-    if (args.example_file != ''):
-        with open(args.example_file) as f:
-            lines = f.readlines()
-    else:
-        command = args.stat_command.split(' ')
-        command_out = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        command_stdout = command_out.stdout.decode('utf8')
-        lines = command_stdout.split('\n')
-    if (args.stat_command == 'qstat -F'):
-        df = get_qstat_df(lines)
-        print_resource_availability(df)
-    else:
-        print('Exiting. --stat_command does not support: {}'.format(args.stat_command))
-        exit(1)
+    for i in range(args.niter):
+        if (args.example_file != ''):
+            with open(args.example_file) as f:
+                lines = f.readlines()
+        else:
+            command = args.stat_command.split(' ')
+            command_out = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            command_stdout = command_out.stdout.decode('utf8')
+            lines = command_stdout.split('\n')
+        if (args.stat_command == 'qstat -F'):
+            df_i = get_qstat_df(lines)
+        else:
+            print('Exiting. --stat_command does not support: {}'.format(args.stat_command))
+            exit(1)
+        if i==0:
+            df = df_i
+        else:
+            for col in ['ncore_available','hc:mem_req']:
+                is_less_available = df[col]>df_i[col]
+                df.loc[is_less_available,col] = df_i.loc[is_less_available,col]
+    print_resource_availability(df, args)
     if args.out!='':
         df.to_csv(args.out, sep='\t', index=False)

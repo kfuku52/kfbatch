@@ -7,7 +7,6 @@ from distutils.util import strtobool
 parser = argparse.ArgumentParser(description='A toolkit for the batch job management.')
 subparsers = parser.add_subparsers()
 
-
 def command_stat(args):
     from kfbatch.stat import stat_main
     stat_main(args)
@@ -18,6 +17,10 @@ pstat.add_argument('--stat_command', metavar='command', default='qstat -F', type
 pstat.add_argument('--example_file', metavar='PATH', default='', type=str, required=False, action='store',
                    help='default=%(default)s: PATH to a file with --stat_command stdout. '
                    'Only for demo and debugging.')
+pstat.add_argument('--ntop', metavar='INT', default=3, type=int, required=False, action='store',
+                   help='default=%(default)s: Number of top available nodes to print.')
+pstat.add_argument('--niter', metavar='INT', default=5, type=int, required=False, action='store',
+                   help='default=%(default)s: Number of iterations to run --stat_command to get stable results.')
 pstat.add_argument('--out', metavar='PATH', default='', type=str, required=False, action='store',
                    help='default=%(default)s: Save the full table if specified.')
 pstat.set_defaults(handler=command_stat)
