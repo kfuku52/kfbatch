@@ -38,7 +38,7 @@ def get_qstat_df(lines):
             value = re.sub('.*=', '', line)
             node_params[key] = value
     for col in ['ncore_resv','ncore_used','ncore_total']:
-        df.loc[:,col] = df.loc[:,col].astype(int)
+        df[col] = df[col].astype(int)
     df.loc[:,'ncore_available'] = df['ncore_total'] - df['ncore_used'] - df['ncore_resv']
     df = df.sort_values(by=['queue_name','node_name']).reset_index(drop=True)
     return df
@@ -57,8 +57,8 @@ def print_stats(df):
         print(txt.format(queue_name, num_avail_cpu, avail_ram, ram_unit, node_name, node_status))
 
 def print_resource_availability(df, args):
-    df.loc[:,'hc:mem_req_unit'] = df.loc[:,'hc:mem_req'].str.replace(r'^[\.0-9]+([A-Z]*)$', r'\1', regex=True).fillna('')
-    df.loc[:,'hc:mem_req'] = df.loc[:,'hc:mem_req'].str.replace('[A-Z]$', '', regex=True).astype(float)
+    df['hc:mem_req_unit'] = df['hc:mem_req'].str.replace(r'^[\.0-9]+([A-Z]*)$', r'\1', regex=True).fillna('')
+    df['hc:mem_req'] = df['hc:mem_req'].str.replace('[A-Z]$', '', regex=True).astype(float)
     queue_names = df.loc[:,'queue_name'].unique()
     queue_names = [ q for q in queue_names if not q.startswith('login') ]
     for resource_name, col in zip(['RAM', 'core'], ['hc:mem_req', 'ncore_available']):
