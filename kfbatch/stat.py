@@ -61,15 +61,25 @@ def print_resource_availability(df, args):
     df['hc:mem_req'] = df['hc:mem_req'].str.replace('[A-Z]$', '', regex=True).astype(float)
     queue_names = df.loc[:,'queue_name'].unique()
     queue_names = [ q for q in queue_names if not q.startswith('login') ]
-    for resource_name, col in zip(['RAM', 'core'], ['hc:mem_req', 'ncore_available']):
+    resources = dict()
+    resources['RAM'] = 'hc:mem_req'
+    resources['core'] = 'ncore_available'
+    for resource_name in resources.keys():
+        col = resources[resource_name]
         print('Reporting top {} availability:'.format(resource_name))
         for queue_name in queue_names:
             df_queue = df.loc[(df['queue_name']==queue_name),:]
-            descending_values = df_queue[col].sort_values(ascending=False)
-            threshold_value = descending_values.iloc[min(args.ntop-1, descending_values.shape[0]-1)]
-            df_top_available_ram = df_queue.loc[(df_queue[col]>=threshold_value),:]
-            df_top_available_ram = df_top_available_ram.sort_values(by=col, ascending=False).reset_index(drop=True)
-            print_stats(df=df_top_available_ram)
+            other_cols = [ oc for oc in list(resources.values()) if oc!=col ]
+            sort_by = [col, ] + other_cols
+            df_queue = df_queue.sort_values(by=sort_by, ascending=False).reset_index(drop=True)
+            if args.all_tiers:
+                descending_values = df_queue[col]
+                threshold_value = descending_values.iloc[min(args.ntop-1, descending_values.shape[0]-1)]
+                df_top_availability = df_queue.loc[(df_queue[col]>=threshold_value),:]
+                df_top_availability = df_top_availability.sort_values(by=col, ascending=False).reset_index(drop=True)
+            else:
+                df_top_availability = df_queue.iloc[0:args.ntop,:]
+            print_stats(df=df_top_availability)
         print('')
 
 def stat_main(args):

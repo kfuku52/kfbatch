@@ -19,6 +19,8 @@ pstat.add_argument('--example_file', metavar='PATH', default='', type=str, requi
                    'Only for demo and debugging.')
 pstat.add_argument('--ntop', metavar='INT', default=3, type=int, required=False, action='store',
                    help='default=%(default)s: Number of top available nodes to print.')
+pstat.add_argument('--all_tiers', metavar='[yes,no]', default='no', type=strtobool, required=False, action='store',
+                   help='default=%(default)s: Whether to show all nodes tied to the "ntop" resources.')
 pstat.add_argument('--niter', metavar='INT', default=5, type=int, required=False, action='store',
                    help='default=%(default)s: Number of iterations to run --stat_command to get stable results.')
 pstat.add_argument('--out', metavar='PATH', default='', type=str, required=False, action='store',
