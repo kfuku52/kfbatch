@@ -60,11 +60,13 @@ def print_resource_availability(df, args):
     df['hc:mem_req_unit'] = df['hc:mem_req'].str.replace(r'^[\.0-9]+([A-Z]*)$', r'\1', regex=True).fillna('')
     df['hc:mem_req'] = df['hc:mem_req'].str.replace('[A-Z]$', '', regex=True).astype(float)
     is_t = (df['hc:mem_req_unit']=='T').fillna(False)
-    df.loc[is_t,'hc:mem_req'] = df.loc[is_t,'hc:mem_req'] * 1000
-    df.loc[is_t, 'hc:mem_req_unit'] = 'G'
+    if is_t.sum():
+        df.loc[is_t,'hc:mem_req'] = df.loc[is_t,'hc:mem_req'] * 1000
+        df.loc[is_t, 'hc:mem_req_unit'] = 'G'
     is_m = (df['hc:mem_req_unit']=='M').fillna(False)
-    df.loc[is_m,'hc:mem_req'] = df.loc[is_t,'hc:mem_req'] * 0.001
-    df.loc[is_m, 'hc:mem_req_unit'] = 'G'
+    if is_m.sum():
+        df.loc[is_m,'hc:mem_req'] = df.loc[is_t,'hc:mem_req'] * 0.001
+        df.loc[is_m, 'hc:mem_req_unit'] = 'G'
     queue_names = df.loc[:,'queue_name'].unique()
     queue_names = [ q for q in queue_names if not q.startswith('login') ]
     resources = dict()
