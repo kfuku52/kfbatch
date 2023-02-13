@@ -2,6 +2,7 @@ import pandas
 
 import re
 import subprocess
+import sys
 
 def get_qstat_df(lines):
     lines = [ re.sub('\n$', '', l) for l in lines ]
@@ -90,6 +91,44 @@ def print_resource_availability(df, args):
             print_stats(df=df_top_availability)
         print('')
 
+def get_user_df(lines):
+    ser = pandas.Series(lines)
+    is_user_line = ser.str.match(r'^  [0-9]* ')
+    ser = ser[is_user_line]
+    ser = ser.str.replace(r'\n$', '', regex=True)
+    ser = ser.str.replace(r'^  ', '', regex=True)
+    df_user = pandas.DataFrame(ser.str.split(' +', regex=True).tolist())
+    df_user.columns = ['job_id','prior','name','user','state','submit_or_start_date','submit_or_start_time','slots','ja_task_id']
+    df_user['slots'] = df_user['slots'].astype(int)
+    df_user['total_slots'] = 0
+    for i in df_user.index:
+        task_id = df_user.at[i,'ja_task_id']
+        if ',' in task_id:
+            df_user.at[i,'total_slots'] = df_user.at[i,'slots'] * 2
+        elif '-' in task_id:
+            start = re.sub(r'([0-9]+)-([0-9]+):([0-9]+)', r'\1', task_id)
+            end = re.sub(r'([0-9]+)-([0-9]+):([0-9]+)', r'\2', task_id)
+            step = re.sub(r'([0-9]+)-([0-9]+):([0-9]+)', r'\3', task_id)
+            total_slots = int(df_user.at[i,'slots'] * (int(end) - int(start) + 1) / int(step))
+            df_user.at[i, 'total_slots'] = total_slots
+        else:
+            df_user.at[i, 'total_slots'] = df_user.at[i, 'slots']
+    return df_user
+
+def print_queued_job_summary(df_user):
+    is_running = df_user['state'].str.contains('r', regex=False)
+    is_halted = df_user['state'].str.contains('h', regex=False)
+    is_qwaiting = df_user['state'].str.contains('qw', regex=False)
+    is_error = df_user['state'].str.contains('E', regex=False)
+    num_running = df_user.loc[is_running,'total_slots'].sum()
+    num_halted = df_user.loc[is_halted,'total_slots'].sum()
+    num_qwaiting = df_user.loc[is_qwaiting,'total_slots'].sum()
+    num_error = df_user.loc[is_error,'total_slots'].sum()
+    print('# of CPUs in use for running jobs: {}'.format(num_running))
+    print('# of requested CPUs for queued jobs: {}'.format(num_qwaiting))
+    print('# of CPUs for queued/running jobs in error: {}'.format(num_error))
+    print('')
+
 def stat_main(args):
     for i in range(args.niter):
         if (args.example_file != ''):
@@ -107,6 +146,8 @@ def stat_main(args):
             exit(1)
         if i==0:
             df = df_i
+            df_user = get_user_df(lines)
+            print_queued_job_summary(df_user)
         else:
             for col in ['ncore_available','hc:mem_req']:
                 is_less_available = df[col]>df_i[col]
