@@ -169,12 +169,12 @@ def print_cluster_summary(df):
         num_abnormal_node = is_abnormal_status.sum()
         num_node = df_queue.shape[0]
         num_working_node = num_node - num_abnormal_node
-        ncore_total = df_queue.loc[~is_abnormal_status,'ncore_total'].sum()
+        ncore_total = df_queue.loc[:,'ncore_total'].sum()
         ncore_used = df_queue.loc[~is_abnormal_status,'ncore_used'].sum()
         ncore_reserved = df_queue.loc[~is_abnormal_status,'ncore_resv'].sum()
         ncore_abnormal = df_queue.loc[is_abnormal_status,'ncore_total'].sum()
         ncore_available = df_queue.loc[~is_abnormal_status,'ncore_available'].sum()
-        mem_total = df_queue.loc[~is_abnormal_status,'hl:mem_total'].sum()
+        mem_total = df_queue.loc[:,'hl:mem_total'].sum()
         mem_available = df_queue.loc[~is_abnormal_status,'hc:mem_req'].sum()
         txt = '{}: {}/{}/{} nodes, {}/{}/{}/{}/{} CPUs, and {:,.0f}/{:,.0f}G RAM'
         print(txt.format(queue_name,
