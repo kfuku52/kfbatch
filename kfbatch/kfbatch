@@ -25,6 +25,9 @@ pstat.add_argument('--niter', metavar='INT', default=5, type=int, required=False
                    help='default=%(default)s: Number of iterations to run --stat_command to get stable results.')
 pstat.add_argument('--out', metavar='PATH', default='', type=str, required=False, action='store',
                    help='default=%(default)s: Save the full table if specified.')
+pstat.add_argument('--exclude_abnormal_node', metavar='[yes,no]', default='yes', type=strtobool, required=False, action='store',
+                   help='default=%(default)s: Whether to report nodes with abnormal status, such as a(larm) and d(isabled).')
+
 pstat.set_defaults(handler=command_stat)
 
 def command_help(args):

@@ -58,16 +58,6 @@ def print_stats(df):
         print(txt.format(queue_name, num_avail_cpu, avail_ram, ram_unit, node_name, node_status))
 
 def print_resource_availability(df, args):
-    df['hc:mem_req_unit'] = df['hc:mem_req'].str.replace(r'^[\.0-9]+([A-Z]*)$', r'\1', regex=True).fillna('')
-    df['hc:mem_req'] = df['hc:mem_req'].str.replace('[A-Z]$', '', regex=True).astype(float)
-    is_t = (df['hc:mem_req_unit']=='T').fillna(False)
-    if is_t.sum():
-        df.loc[is_t,'hc:mem_req'] = df.loc[is_t,'hc:mem_req'] * 1000
-        df.loc[is_t, 'hc:mem_req_unit'] = 'G'
-    is_m = (df['hc:mem_req_unit']=='M').fillna(False)
-    if is_m.sum():
-        df.loc[is_m,'hc:mem_req'] = df.loc[is_t,'hc:mem_req'] * 0.001
-        df.loc[is_m, 'hc:mem_req_unit'] = 'G'
     queue_names = df.loc[:,'queue_name'].unique()
     queue_names = [ q for q in queue_names if not q.startswith('login') ]
     resources = dict()
@@ -77,7 +67,10 @@ def print_resource_availability(df, args):
         col = resources[resource_name]
         print('Reporting top {} availability:'.format(resource_name))
         for queue_name in queue_names:
-            df_queue = df.loc[(df['queue_name']==queue_name),:]
+            if args.exclude_abnormal_node:
+                df_queue = df.loc[(df['queue_name']==queue_name)&(df['status']==''),:]
+            else:
+                df_queue = df.loc[(df['queue_name']==queue_name),:]
             other_cols = [ oc for oc in list(resources.values()) if oc!=col ]
             sort_by = [col, ] + other_cols
             df_queue = df_queue.sort_values(by=sort_by, ascending=False).reset_index(drop=True)
@@ -129,7 +122,7 @@ def print_queued_job_summary(df_user):
     print('# of CPUs for queued/running jobs in error: {}'.format(num_error))
     print('')
 
-def stat_main(args):
+def get_df(args):
     for i in range(args.niter):
         if (args.example_file != ''):
             with open(args.example_file) as f:
@@ -152,6 +145,48 @@ def stat_main(args):
             for col in ['ncore_available','hc:mem_req']:
                 is_less_available = df[col]>df_i[col]
                 df.loc[is_less_available,col] = df_i.loc[is_less_available,col]
+    return df
+
+def adjust_ram_unit(df):
+    for col in ['hc:mem_req','hl:mem_total']:
+        df[col+'_unit'] = df[col].str.replace(r'^[\.0-9]+([A-Z]*)$', r'\1', regex=True).fillna('')
+        df[col] = df[col].str.replace('[A-Z]$', '', regex=True).astype(float)
+        is_t = (df[col+'_unit']=='T').fillna(False)
+        if is_t.sum():
+            df.loc[is_t,col] = df.loc[is_t,col] * 1000
+            df.loc[is_t, col+'_unit'] = 'G'
+        is_m = (df[col+'_unit']=='M').fillna(False)
+        if is_m.sum():
+            df.loc[is_m,col] = df.loc[is_t,col] * 0.001
+            df.loc[is_m, col+'_unit'] = 'G'
+    return df
+def print_cluster_summary(df):
+    queue_names = df['queue_name'].unique()
+    print('Reporting working/abnormal/total nodes, available/used/reserved/abnormal/total CPUs, and available/total RAM:')
+    for queue_name in queue_names:
+        df_queue = df.loc[(df['queue_name']==queue_name),:].reset_index(drop=True)
+        is_abnormal_status = (df_queue['status']!='')
+        num_abnormal_node = is_abnormal_status.sum()
+        num_node = df_queue.shape[0]
+        num_working_node = num_node - num_abnormal_node
+        ncore_total = df_queue.loc[~is_abnormal_status,'ncore_total'].sum()
+        ncore_used = df_queue.loc[~is_abnormal_status,'ncore_used'].sum()
+        ncore_reserved = df_queue.loc[~is_abnormal_status,'ncore_resv'].sum()
+        ncore_abnormal = df_queue.loc[is_abnormal_status,'ncore_total'].sum()
+        ncore_available = df_queue.loc[~is_abnormal_status,'ncore_available'].sum()
+        mem_total = df_queue.loc[~is_abnormal_status,'hl:mem_total'].sum()
+        mem_available = df_queue.loc[~is_abnormal_status,'hc:mem_req'].sum()
+        txt = '{}: {}/{}/{} nodes, {}/{}/{}/{}/{} CPUs, and {:,.0f}/{:,.0f}G RAM'
+        print(txt.format(queue_name,
+                         num_working_node, num_abnormal_node, num_node,
+                         ncore_available, ncore_used, ncore_reserved, ncore_abnormal, ncore_total,
+                         mem_available, mem_total))
+    print('')
+
+def stat_main(args):
+    df = get_df(args)
+    df = adjust_ram_unit(df)
+    print_cluster_summary(df)
     print_resource_availability(df, args)
     if args.out!='':
         df.to_csv(args.out, sep='\t', index=False)
