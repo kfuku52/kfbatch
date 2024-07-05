@@ -17,7 +17,7 @@ setup(
         url              = 'https://github.com/kfuku52/kfbatch.git',
         keywords         = 'phylogenetics',
         packages         = find_packages(),
-        install_requires = [],
+        install_requires = ['pandas',],
         scripts          = ['kfbatch/kfbatch',],
         include_package_data = False,
 )
