@@ -40,7 +40,8 @@ def get_qstat_df(lines):
             node_params[key] = value
     for col in ['ncore_resv','ncore_used','ncore_total']:
         df[col] = df[col].astype(int)
-    df.loc[:,'ncore_available'] = df['ncore_total'] - df['ncore_used'] - df['ncore_resv']
+    tmp = pandas.DataFrame({'ncore_available': df['ncore_total'] - df['ncore_used'] - df['ncore_resv']})
+    df = pandas.concat([df, tmp], axis=1)
     df = df.sort_values(by=['queue_name','node_name']).reset_index(drop=True)
     return df
 
