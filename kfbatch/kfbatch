@@ -1,45 +1,51 @@
 #!/usr/bin/env python
 
 import argparse
+import sys
 from distutils.util import strtobool
 
-# Main parser
-parser = argparse.ArgumentParser(description='A toolkit for the batch job management.')
-subparsers = parser.add_subparsers()
+def _normalize_legacy_argv(argv):
+    if len(argv)>1 and argv[1]=='stat':
+        return [argv[0], ] + argv[2:]
+    if len(argv)>1 and argv[1]=='help':
+        return [argv[0], '-h']
+    return argv
 
-def command_stat(args):
+def _build_parser():
+    parser = argparse.ArgumentParser(description='A toolkit for the batch job management.')
+    parser.add_argument('--stat_command', metavar='command', default='squeue', type=str, required=False, action='store',
+                        help='default=%(default)s: PATH to the command that shows cluster-wide batch job status.')
+    parser.add_argument('--example_file', metavar='PATH', default='', type=str, required=False, action='store',
+                        help='default=%(default)s: PATH to a file with --stat_command stdout. '
+                        'Only for demo and debugging.')
+    parser.add_argument('--slurm_node_command', metavar='command', default='scontrol show node -o', type=str, required=False, action='store',
+                        help='default=%(default)s: Command for SLURM node status/capacity details.')
+    parser.add_argument('--slurm_node_example_file', metavar='PATH', default='', type=str, required=False, action='store',
+                        help='default=%(default)s: PATH to a file with --slurm_node_command stdout.')
+    parser.add_argument('--slurm_partition_command', metavar='command', default='scontrol show partition -o', type=str, required=False, action='store',
+                        help='default=%(default)s: Command for SLURM partition metadata.')
+    parser.add_argument('--slurm_partition_example_file', metavar='PATH', default='', type=str, required=False, action='store',
+                        help='default=%(default)s: PATH to a file with --slurm_partition_command stdout.')
+    parser.add_argument('--ntop', metavar='INT', default=3, type=int, required=False, action='store',
+                        help='default=%(default)s: Number of top available nodes to print.')
+    parser.add_argument('--all_tiers', metavar='[yes,no]', default='no', type=strtobool, required=False, action='store',
+                        help='default=%(default)s: Whether to show all nodes tied to the "ntop" resources.')
+    parser.add_argument('--niter', metavar='INT', default=5, type=int, required=False, action='store',
+                        help='default=%(default)s: Number of iterations for qstat mode to get stable results.')
+    parser.add_argument('--out', metavar='PATH', default='', type=str, required=False, action='store',
+                        help='default=%(default)s: Save the full table if specified.')
+    parser.add_argument('--exclude_abnormal_node', metavar='[yes,no]', default='yes', type=strtobool, required=False, action='store',
+                        help='default=%(default)s: Whether to report nodes with abnormal status, such as a(larm) and d(isabled).')
+    return parser
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv
+    argv = _normalize_legacy_argv(list(argv))
+    parser = _build_parser()
+    args = parser.parse_args(argv[1:])
     from kfbatch.stat import stat_main
     stat_main(args)
-pstat = subparsers.add_parser('stat', help='Return availability of clusters', parents=[])
-pstat.add_argument('--stat_command', metavar='command', default='qstat -F', type=str, required=False, action='store',
-                   choices=['qstat -F',],
-                   help='default=%(default)s: PATH to the command that shows cluster-wide batch job status.')
-pstat.add_argument('--example_file', metavar='PATH', default='', type=str, required=False, action='store',
-                   help='default=%(default)s: PATH to a file with --stat_command stdout. '
-                   'Only for demo and debugging.')
-pstat.add_argument('--ntop', metavar='INT', default=3, type=int, required=False, action='store',
-                   help='default=%(default)s: Number of top available nodes to print.')
-pstat.add_argument('--all_tiers', metavar='[yes,no]', default='no', type=strtobool, required=False, action='store',
-                   help='default=%(default)s: Whether to show all nodes tied to the "ntop" resources.')
-pstat.add_argument('--niter', metavar='INT', default=5, type=int, required=False, action='store',
-                   help='default=%(default)s: Number of iterations to run --stat_command to get stable results.')
-pstat.add_argument('--out', metavar='PATH', default='', type=str, required=False, action='store',
-                   help='default=%(default)s: Save the full table if specified.')
-pstat.add_argument('--exclude_abnormal_node', metavar='[yes,no]', default='yes', type=strtobool, required=False, action='store',
-                   help='default=%(default)s: Whether to report nodes with abnormal status, such as a(larm) and d(isabled).')
 
-pstat.set_defaults(handler=command_stat)
-
-def command_help(args):
-    print(parser.parse_args([args.command, '--help']))
-parser_help = subparsers.add_parser('help', help='Show help messages')
-parser_help.add_argument('command', help='command name which help is shown')
-parser_help.set_defaults(handler=command_help)
-
-
-# Handler
-args = parser.parse_args()
-if hasattr(args, 'handler'):
-    args.handler(args)
-else:
-    parser.print_help()
+if __name__=='__main__':
+    main()
