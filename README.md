@@ -11,9 +11,12 @@ pip install git+https://github.com/kfuku52/kfbatch
 kfbatch -h 
 ```
 
-## Subcommands
+## Usage
+Run `kfbatch` directly with options.
+
+`kfbatch stat ...` is accepted as a legacy alias and behaves the same as `kfbatch ...`.
+
 See [Wiki](https://github.com/kfuku52/kfbatch/wiki) for usage.
 
 # Licensing
 This program is MIT-licensed. See [LICENSE](LICENSE) for details.
-
