@@ -2,7 +2,16 @@
 
 import argparse
 import sys
-from distutils.util import strtobool
+
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    txt = str(value).strip().lower()
+    if txt in {'y', 'yes', 't', 'true', 'on', '1'}:
+        return True
+    if txt in {'n', 'no', 'f', 'false', 'off', '0'}:
+        return False
+    raise argparse.ArgumentTypeError('Expected one of yes/no, true/false, on/off, or 1/0.')
 
 def _normalize_legacy_argv(argv):
     if len(argv)>1 and argv[1]=='stat':
@@ -28,13 +37,13 @@ def _build_parser():
                         help='default=%(default)s: PATH to a file with --slurm_partition_command stdout.')
     parser.add_argument('--ntop', metavar='INT', default=3, type=int, required=False, action='store',
                         help='default=%(default)s: Number of top available nodes to print.')
-    parser.add_argument('--all_tiers', metavar='[yes,no]', default='no', type=strtobool, required=False, action='store',
+    parser.add_argument('--all_tiers', metavar='[yes,no]', default='no', type=parse_bool, required=False, action='store',
                         help='default=%(default)s: Whether to show all nodes tied to the "ntop" resources.')
     parser.add_argument('--niter', metavar='INT', default=5, type=int, required=False, action='store',
                         help='default=%(default)s: Number of iterations for qstat mode to get stable results.')
     parser.add_argument('--out', metavar='PATH', default='', type=str, required=False, action='store',
                         help='default=%(default)s: Save the full table if specified.')
-    parser.add_argument('--exclude_abnormal_node', metavar='[yes,no]', default='yes', type=strtobool, required=False, action='store',
+    parser.add_argument('--exclude_abnormal_node', metavar='[yes,no]', default='yes', type=parse_bool, required=False, action='store',
                         help='default=%(default)s: Whether to report nodes with abnormal status, such as a(larm) and d(isabled).')
     return parser
 
