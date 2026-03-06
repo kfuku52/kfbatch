@@ -33,8 +33,7 @@ Depending on the scheduler, `kfbatch` reports:
 
 - queued/running/failed task counts
 - cluster-wide node, CPU, and RAM summaries
-- top nodes by available RAM
-- top nodes by available cores
+- on SLURM, a compact one-row-per-partition table
 - on SLURM, a per-partition launch heuristic for the current user
 
 In SLURM mode, task counts are shown for both the current user and all users.
@@ -51,12 +50,6 @@ UGE mode:
 
 ```bash
 kfbatch --stat_command "qstat -F"
-```
-
-Legacy alias:
-
-```bash
-kfbatch stat --stat_command "qstat -F"
 ```
 
 ## Useful Examples
@@ -103,23 +96,14 @@ kfbatch --show_launch_heuristic no
 ## Example Output
 
 ```text
-# of running job tasks for current user (estimated from squeue): 0
-# of running job tasks for all users (estimated from squeue): 271
-# of queued job tasks for current user (estimated from squeue): 0
-# of queued job tasks for all users (estimated from squeue): 30125
+jobs  self:R/Q/F=0/5/0  all:R/Q/F=239/7318/0
 
-Reporting working/abnormal/total nodes, available/used/reserved/abnormal/total CPUs, and available/total RAM:
-epyc: 3/10/13 nodes, 68/267/0/1824/2159 CPUs, and 10/17,112G RAM
-rome: 5/1/6 nodes, 404/236/0/128/768 CPUs, and 317/3,093G RAM
+part    nodes    cpu(a/u/t)   ram(a/t)G  topCPU         topRAM         launch
+epyc    3/10/13  14/321/2159  451/17112  a004 14c/5G    a017 0c/352G   PRIO min=1c/1G/5m gap=18097 fs=17960
+rome    5/1/6    458/182/768  104/3093   at141 103c/12G at139 94c/49G  PRIO min=1c/1G/5m gap=1701 fs=1037
+short   2/0/2    256/0/256    1031/1031  at137 128c/516G same          <=128c/516G
 
-Reporting heuristic single-node launch ceilings for kf (reservation-adjusted, priority-aware):
-epyc:
-  immediate-start ceiling: n/a
-  top free node: a004 has 59 CPUs and 925G RAM
-  smallest current Priority-blocked request is 1 CPUs / 1G / 00:05:00
-  priority gap: 3931
-  fairshare gap: 3926
-  note: current user has Priority-blocked jobs; no stable immediate-start ceiling can be inferred
+legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/total
 ```
 
 ## Notes

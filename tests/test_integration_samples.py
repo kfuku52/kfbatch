@@ -140,8 +140,29 @@ def test_slurm_cli_truncated_squeue_reports_estimated_note():
         ]
     )
     assert out.returncode == 0
-    assert "Note:" in out.stdout
+    assert "note:" in out.stdout
     assert "task counts are estimated" in out.stdout
+
+
+def test_slurm_cli_uses_compact_partition_table():
+    out = _run_cli(
+        [
+            "--example_file",
+            "squeue_notrunc.txt",
+            "--stat_command",
+            "squeue",
+            "--slurm_node_example_file",
+            "scontrol_show_node_o.txt",
+            "--slurm_partition_example_file",
+            "scontrol_show_partition_o.txt",
+        ]
+    )
+    assert out.returncode == 0
+    assert "jobs  self:R/Q/F=" in out.stdout
+    assert "part" in out.stdout
+    assert "cpu(a/u/t)" in out.stdout
+    assert "ram(a/t)G" in out.stdout
+    assert "launch" in out.stdout
 
 
 def test_qstat_cli_writes_valid_tsv(tmp_path):

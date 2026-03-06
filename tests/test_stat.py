@@ -18,6 +18,7 @@ from kfbatch.stat import (
     get_scontrol_reservation_df,
     get_slurm_launch_heuristic_df,
     get_sprio_df,
+    print_slurm_compact_summary,
     print_queued_job_summary,
     print_slurm_launch_heuristic,
     get_user_df,
@@ -495,12 +496,7 @@ def test_print_queued_job_summary_slurm_accepts_long_state_names(capsys):
     )
     print_queued_job_summary(df_user, scheduler="slurm", current_user="kfuku")
     out = capsys.readouterr().out
-    assert "# of running job tasks for current user (estimated from squeue): 2" in out
-    assert "# of running job tasks for all users (estimated from squeue): 2" in out
-    assert "# of queued job tasks for current user (estimated from squeue): 0" in out
-    assert "# of queued job tasks for all users (estimated from squeue): 3" in out
-    assert "# of failed/cancelled job tasks for current user (estimated from squeue): 4" in out
-    assert "# of failed/cancelled job tasks for all users (estimated from squeue): 4" in out
+    assert "jobs  self:R/Q/F=2/0/4  all:R/Q/F=2/3/4" in out
 
 
 def test_print_slurm_launch_heuristic_uses_multiline_blocks(capsys):
@@ -527,6 +523,49 @@ def test_print_slurm_launch_heuristic_uses_multiline_blocks(capsys):
     assert "  top free node: a004 has 59 CPUs and 925G RAM\n" in out
     assert "  smallest current Priority-blocked request is 1 CPUs / 1G / 00:05:00\n" in out
     assert "  note: current user has Priority-blocked jobs; no stable immediate-start ceiling can be inferred\n" in out
+
+
+def test_print_slurm_compact_summary_uses_single_row_per_partition(capsys):
+    df = pandas.DataFrame(
+        {
+            "queue_name": ["epyc", "epyc", "rome"],
+            "node_name": ["a004", "a017", "at141"],
+            "status": ["", "", ""],
+            "ncore_available": [14, 0, 103],
+            "ncore_used": [178, 81, 25],
+            "ncore_total": [192, 81, 128],
+            "ncore_resv": [0, 0, 0],
+            "hc:mem_req": [5.0, 352.0, 12.0],
+            "hl:mem_total": [1548.0, 376.0, 516.0],
+        }
+    )
+    df_launch = pandas.DataFrame(
+        {
+            "queue_name": ["epyc", "rome"],
+            "recommended_cores": [None, None],
+            "recommended_mem_gib": [None, None],
+            "top_node_name": ["a004", "at141"],
+            "top_node_cores": [14, 103],
+            "top_node_mem_gib": [5.0, 12.0],
+            "priority_gap": [18097, 1701],
+            "fairshare_gap": [17960, 1037],
+            "blocked_req_cores": [1, 1],
+            "blocked_req_mem_gib": [1.0, 1.0],
+            "blocked_time_limit": ["5:00", "5:00"],
+            "status": ["priority_blocked", "priority_blocked"],
+        }
+    )
+    args = SimpleNamespace(exclude_abnormal_node=True)
+    print_slurm_compact_summary(df, df_launch, args)
+    out = capsys.readouterr().out
+    assert "part" in out
+    assert "nodes" in out
+    assert "cpu(a/u/t)" in out
+    assert "epyc" in out
+    assert "a004 14c/5G" in out
+    assert "a017 0c/352G" in out
+    assert "PRIO min=1c/1G/5m gap=18097 fs=17960" in out
+    assert "legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/total" in out
 
 
 def test_get_df_qstat_requires_niter_at_least_one():
