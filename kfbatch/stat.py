@@ -1,9 +1,19 @@
 import pandas
 
+import getpass
 import os
 import re
 import shlex
 import subprocess
+
+class KFBatchError(Exception):
+    pass
+
+class KFBatchUsageError(KFBatchError):
+    pass
+
+class KFBatchCommandError(KFBatchError):
+    pass
 
 SLURM_RUNNING_STATES = {'R', 'CG'}
 SLURM_PENDING_STATES = {'PD', 'CF'}
@@ -53,7 +63,7 @@ SLURM_UNAVAILABLE_NODE_FLAGS = {
     'PLANNED',
     'RESERVED',
 }
-SLURM_SQUEUE_PARSE_FIELDS = '%i\t%P\t%j\t%u\t%t\t%M\t%D\t%R'
+SLURM_SQUEUE_PARSE_FIELDS = '%i\t%P\t%j\t%u\t%t\t%M\t%D\t%C\t%m\t%l\t%R'
 QSTAT_REQUIRED_NODE_FIELDS = {
     'queue_name',
     'node_name',
@@ -187,6 +197,74 @@ def _memory_series_to_gib(series):
     if is_k.sum():
         values.loc[is_k] = values.loc[is_k] * 0.000001
     return values
+
+def _memory_text_to_gib(value):
+    if value is None:
+        return 0.0
+    txt = str(value).strip()
+    if txt=='':
+        return 0.0
+    m = re.match(r'^([0-9]+(?:\.[0-9]+)?)([A-Za-z]+)?$', txt)
+    if m is None:
+        return 0.0
+    number = float(m.group(1))
+    unit = (m.group(2) or 'G').upper()
+    if unit.startswith('T'):
+        return number * 1000.0
+    if unit.startswith('G'):
+        return number
+    if unit.startswith('M'):
+        return number * 0.001
+    if unit.startswith('K'):
+        return number * 0.000001
+    return number
+
+def _memory_text_to_mb(value):
+    return int(round(_memory_text_to_gib(value) * 1000.0))
+
+def _extract_tres_resource_value(tres_txt, resource_name):
+    txt = str(tres_txt).strip()
+    if txt=='':
+        return ''
+    prefix = '{}='.format(resource_name)
+    for token in txt.split(','):
+        token = token.strip()
+        if token.startswith(prefix):
+            return token[len(prefix):].strip()
+    return ''
+
+def _slurm_time_to_minutes(value):
+    txt = str(value).strip()
+    if txt in ['', 'N/A', 'UNLIMITED', 'NOT_SET']:
+        return float('inf')
+    day_part = 0
+    if '-' in txt:
+        day_txt, txt = txt.split('-', 1)
+        day_part = _safe_int(day_txt, default=0)
+    items = txt.split(':')
+    if len(items)==3:
+        hours = _safe_int(items[0], default=0)
+        minutes = _safe_int(items[1], default=0)
+        seconds = _safe_int(items[2], default=0)
+    elif len(items)==2:
+        hours = 0
+        minutes = _safe_int(items[0], default=0)
+        seconds = _safe_int(items[1], default=0)
+    elif len(items)==1:
+        hours = 0
+        minutes = _safe_int(items[0], default=0)
+        seconds = 0
+    else:
+        return float('inf')
+    total_minutes = (day_part * 24 * 60) + (hours * 60) + minutes + (seconds / 60.0)
+    return float(total_minutes)
+
+def _extract_slurm_pending_reason(node_or_reason):
+    txt = str(node_or_reason).strip()
+    m = re.match(r'^\((.*)\)$', txt)
+    if m is None:
+        return ''
+    return m.group(1).strip()
 
 def _merge_qstat_iteration_min_availability(df, df_i):
     key_cols = ['queue_name', 'node_name']
@@ -328,7 +406,12 @@ def get_squeue_user_df(lines):
         'state',
         'elapsed_time',
         'num_nodes',
+        'req_cpus',
+        'req_mem',
+        'time_limit',
         'node_or_reason',
+        'pending_reason',
+        'resource_fields_complete',
         'total_slots',
         'task_count_estimated',
     ]
@@ -340,46 +423,101 @@ def get_squeue_user_df(lines):
         if line.lstrip().startswith('JOBID '):
             continue
         if '\t' in line:
-            items = line.split('\t', 7)
-            if len(items)<8:
+            items = line.split('\t')
+            if len(items)>=11:
+                resource_fields_complete = True
+                job_id = items[0].strip()
+                partition = items[1].strip()
+                name = items[2].strip()
+                user = items[3].strip()
+                state = items[4].strip()
+                elapsed_time = items[5].strip()
+                num_nodes_txt = items[6].strip()
+                req_cpus_txt = items[7].strip()
+                req_mem = items[8].strip()
+                time_limit = items[9].strip()
+                node_or_reason = '\t'.join(items[10:]).strip()
+            elif len(items)>=8:
+                resource_fields_complete = False
+                job_id = items[0].strip()
+                partition = items[1].strip()
+                name = items[2].strip()
+                user = items[3].strip()
+                state = items[4].strip()
+                elapsed_time = items[5].strip()
+                num_nodes_txt = items[6].strip()
+                req_cpus_txt = ''
+                req_mem = ''
+                time_limit = ''
+                node_or_reason = '\t'.join(items[7:]).strip()
+            else:
                 continue
-            job_id = items[0].strip()
-            partition = items[1].strip()
-            name = items[2].strip()
-            user = items[3].strip()
-            state = items[4].strip()
-            elapsed_time = items[5].strip()
-            num_nodes_txt = items[6].strip()
-            node_or_reason = items[7].strip()
         elif '\\t' in line:
             # Some captured files may contain literal "\t" separators.
-            items = line.split('\\t', 7)
-            if len(items)<8:
+            items = line.split('\\t')
+            if len(items)>=11:
+                resource_fields_complete = True
+                job_id = items[0].strip()
+                partition = items[1].strip()
+                name = items[2].strip()
+                user = items[3].strip()
+                state = items[4].strip()
+                elapsed_time = items[5].strip()
+                num_nodes_txt = items[6].strip()
+                req_cpus_txt = items[7].strip()
+                req_mem = items[8].strip()
+                time_limit = items[9].strip()
+                node_or_reason = '\\t'.join(items[10:]).strip()
+            elif len(items)>=8:
+                resource_fields_complete = False
+                job_id = items[0].strip()
+                partition = items[1].strip()
+                name = items[2].strip()
+                user = items[3].strip()
+                state = items[4].strip()
+                elapsed_time = items[5].strip()
+                num_nodes_txt = items[6].strip()
+                req_cpus_txt = ''
+                req_mem = ''
+                time_limit = ''
+                node_or_reason = '\\t'.join(items[7:]).strip()
+            else:
                 continue
-            job_id = items[0].strip()
-            partition = items[1].strip()
-            name = items[2].strip()
-            user = items[3].strip()
-            state = items[4].strip()
-            elapsed_time = items[5].strip()
-            num_nodes_txt = items[6].strip()
-            node_or_reason = items[7].strip()
         else:
-            items = re.split(r'\s+', line.strip(), maxsplit=7)
-            if len(items)<8:
+            items = re.split(r'\s+', line.strip(), maxsplit=10)
+            if len(items)>=11:
+                resource_fields_complete = True
+                job_id = items[0]
+                partition = items[1]
+                name = items[2]
+                user = items[3]
+                state = items[4]
+                elapsed_time = items[5]
+                num_nodes_txt = items[6]
+                req_cpus_txt = items[7]
+                req_mem = items[8]
+                time_limit = items[9]
+                node_or_reason = items[10]
+            elif len(items)>=8:
+                resource_fields_complete = False
+                job_id = items[0]
+                partition = items[1]
+                name = items[2]
+                user = items[3]
+                state = items[4]
+                elapsed_time = items[5]
+                num_nodes_txt = items[6]
+                req_cpus_txt = ''
+                req_mem = ''
+                time_limit = ''
+                node_or_reason = items[7]
+            else:
                 continue
-            job_id = items[0]
-            partition = items[1]
-            name = items[2]
-            user = items[3]
-            state = items[4]
-            elapsed_time = items[5]
-            num_nodes_txt = items[6]
-            node_or_reason = items[7]
         try:
             num_nodes = int(num_nodes_txt)
         except ValueError:
             num_nodes = 1
+        req_cpus = _safe_int(req_cpus_txt, default=0)
         num_tasks, is_estimated = estimate_slurm_task_count(job_id)
         total_slots = num_tasks
         table.append({
@@ -390,7 +528,12 @@ def get_squeue_user_df(lines):
             'state': state,
             'elapsed_time': elapsed_time,
             'num_nodes': num_nodes,
+            'req_cpus': req_cpus,
+            'req_mem': req_mem,
+            'time_limit': time_limit,
             'node_or_reason': node_or_reason,
+            'pending_reason': _extract_slurm_pending_reason(node_or_reason),
+            'resource_fields_complete': resource_fields_complete,
             'total_slots': total_slots,
             'task_count_estimated': is_estimated,
         })
@@ -437,6 +580,11 @@ def _safe_int(value, default=0):
         return int(value)
     except (ValueError, TypeError):
         return default
+
+def _format_error_message(summary, detail='', quiet=False):
+    if quiet or (str(detail).strip()==''):
+        return summary
+    return '{}\n{}'.format(summary, detail)
 
 def _partition_state_is_up(partition_state):
     state = str(partition_state).strip().upper()
@@ -486,6 +634,182 @@ def get_scontrol_partition_df(lines):
         })
     return pandas.DataFrame(rows, columns=columns)
 
+def _split_scontrol_named_blocks(lines, anchor_key):
+    blocks = []
+    current = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line=='':
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        if line.startswith(anchor_key) and current:
+            blocks.append(current)
+            current = [line]
+            continue
+        if not current:
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append(current)
+    return blocks
+
+def _count_core_id_expression(core_ids):
+    txt = str(core_ids).strip()
+    if txt in ['', '(null)', 'N/A']:
+        return 0
+    total = 0
+    for token in txt.split(','):
+        token = token.strip()
+        if token=='':
+            continue
+        m = re.match(r'^([0-9]+)-([0-9]+)$', token)
+        if m is not None:
+            start = int(m.group(1))
+            end = int(m.group(2))
+            if end>=start:
+                total += (end - start) + 1
+            continue
+        if re.match(r'^[0-9]+$', token):
+            total += 1
+    return total
+
+def get_scontrol_reservation_df(lines):
+    columns = ['queue_name', 'node_name', 'reservation_name', 'reserved_cores', 'reserved_mem_mb']
+    rows = []
+    for block in _split_scontrol_named_blocks(lines, 'ReservationName='):
+        header_params = {}
+        for line in block:
+            if ('=' in line) and (line.startswith('ReservationName=') or line.startswith('Nodes=')):
+                header_params.update(_parse_key_value_fields(line))
+        if header_params.get('State', 'ACTIVE') != 'ACTIVE':
+            continue
+        partition_name = header_params.get('PartitionName', '').strip()
+        reservation_name = header_params.get('ReservationName', '').strip()
+        if partition_name=='':
+            continue
+        node_count = _safe_int(header_params.get('NodeCnt', ''), default=0)
+        default_reserved_cores = max(_safe_int(header_params.get('CoreCnt', ''), default=0), 0)
+        reservation_tres = header_params.get('TRES', '')
+        if reservation_tres=='':
+            reservation_tres = header_params.get('ReqTRES', '')
+        default_reserved_mem_mb = max(_memory_text_to_mb(_extract_tres_resource_value(reservation_tres, 'mem')), 0)
+        has_explicit_node_rows = False
+        for line in block:
+            if not line.startswith('NodeName='):
+                continue
+            has_explicit_node_rows = True
+            params = _parse_key_value_fields(line)
+            node_name = params.get('NodeName', '').strip()
+            if node_name=='':
+                continue
+            reserved_cores = _count_core_id_expression(params.get('CoreIDs', ''))
+            if (reserved_cores==0) and (node_count==1):
+                reserved_cores = default_reserved_cores
+            if reserved_cores<=0:
+                continue
+            reserved_mem_mb = 0
+            if (default_reserved_mem_mb>0) and (node_count>0):
+                reserved_mem_mb = int(round(float(default_reserved_mem_mb) / float(node_count)))
+            rows.append({
+                'queue_name': partition_name,
+                'node_name': node_name,
+                'reservation_name': reservation_name,
+                'reserved_cores': reserved_cores,
+                'reserved_mem_mb': reserved_mem_mb,
+            })
+        if has_explicit_node_rows:
+            continue
+        node_name = header_params.get('Nodes', '').strip()
+        if (node_count==1) and (node_name!='') and (not re.search(r'[\[\],]', node_name)) and (default_reserved_cores>0):
+            rows.append({
+                'queue_name': partition_name,
+                'node_name': node_name,
+                'reservation_name': reservation_name,
+                'reserved_cores': default_reserved_cores,
+                'reserved_mem_mb': default_reserved_mem_mb,
+            })
+    return pandas.DataFrame(rows, columns=columns)
+
+def apply_slurm_reservations(df_node, df_reservation):
+    if (df_node is None) or (df_node.shape[0]==0) or (df_reservation is None) or (df_reservation.shape[0]==0):
+        return df_node
+    df = df_node.copy()
+    if 'reservation_cores' not in df.columns:
+        df['reservation_cores'] = 0
+    if 'reservation_mem_mb' not in df.columns:
+        df['reservation_mem_mb'] = 0
+    reservation_rows = df_reservation.copy()
+    if 'reserved_mem_mb' not in reservation_rows.columns:
+        reservation_rows['reserved_mem_mb'] = 0
+    reservation_rows['reserved_mem_mb'] = pandas.to_numeric(reservation_rows['reserved_mem_mb'], errors='coerce').fillna(0).astype(int)
+    node_shape = df.loc[:, ['queue_name', 'node_name', 'ncore_total', 'hl:mem_total']].copy()
+    node_shape['node_total_mem_mb'] = node_shape['hl:mem_total'].map(_memory_text_to_mb)
+    node_shape['ncore_total'] = pandas.to_numeric(node_shape['ncore_total'], errors='coerce').fillna(0).astype(int)
+    reservation_rows = reservation_rows.merge(node_shape, how='left', on=['queue_name', 'node_name'])
+    reservation_rows['reserved_mem_mb_effective'] = reservation_rows['reserved_mem_mb']
+    needs_estimate = (
+        (reservation_rows['reserved_mem_mb_effective']<=0) &
+        (reservation_rows['reserved_cores']>0) &
+        (reservation_rows['ncore_total']>0)
+    )
+    if needs_estimate.sum():
+        reservation_rows.loc[needs_estimate, 'reserved_mem_mb_effective'] = (
+            (reservation_rows.loc[needs_estimate, 'node_total_mem_mb'] * reservation_rows.loc[needs_estimate, 'reserved_cores']) /
+            reservation_rows.loc[needs_estimate, 'ncore_total']
+        ).round().astype(int)
+    grouped = (
+        reservation_rows
+        .groupby(['queue_name', 'node_name'], as_index=False)[['reserved_cores', 'reserved_mem_mb_effective']]
+        .sum()
+        .rename(columns={'reserved_cores': 'reservation_cores', 'reserved_mem_mb_effective': 'reservation_mem_mb'})
+    )
+    df = df.merge(grouped, how='left', on=['queue_name', 'node_name'], suffixes=('', '_new'))
+    if 'reservation_cores_new' in df.columns:
+        new_values = pandas.to_numeric(df['reservation_cores_new'], errors='coerce').fillna(0).astype(int)
+        df['reservation_cores'] = pandas.to_numeric(df['reservation_cores'], errors='coerce').fillna(0).astype(int) + new_values
+        df = df.drop(columns=['reservation_cores_new'])
+    if 'reservation_mem_mb_new' in df.columns:
+        new_values = pandas.to_numeric(df['reservation_mem_mb_new'], errors='coerce').fillna(0).astype(int)
+        df['reservation_mem_mb'] = pandas.to_numeric(df['reservation_mem_mb'], errors='coerce').fillna(0).astype(int) + new_values
+        df = df.drop(columns=['reservation_mem_mb_new'])
+    df['reservation_cores'] = pandas.to_numeric(df['reservation_cores'], errors='coerce').fillna(0).astype(int)
+    df['reservation_mem_mb'] = pandas.to_numeric(df['reservation_mem_mb'], errors='coerce').fillna(0).astype(int)
+    node_available_mem_mb = df['hc:mem_req'].map(_memory_text_to_mb)
+    df['ncore_resv'] = pandas.to_numeric(df['ncore_resv'], errors='coerce').fillna(0).astype(int) + df['reservation_cores']
+    df['ncore_available'] = (
+        pandas.to_numeric(df['ncore_available'], errors='coerce').fillna(0).astype(int) - df['reservation_cores']
+    ).clip(lower=0).astype(int)
+    adjusted_available_mem_mb = (node_available_mem_mb - df['reservation_mem_mb']).clip(lower=0).astype(int)
+    df['hc:mem_req'] = adjusted_available_mem_mb.map(lambda x: '{}M'.format(int(x)))
+    return df
+
+def get_sprio_df(lines):
+    columns = ['job_id', 'partition', 'priority', 'site', 'age', 'fairshare', 'jobsize', 'partition_factor']
+    rows = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line=='':
+            continue
+        if line.startswith('JOBID ') or line.startswith('JOBID\t'):
+            continue
+        items = re.split(r'\s+', line)
+        if len(items)<8:
+            continue
+        rows.append({
+            'job_id': items[0],
+            'partition': items[1],
+            'priority': _safe_int(items[2], default=0),
+            'site': _safe_int(items[3], default=0),
+            'age': _safe_int(items[4], default=0),
+            'fairshare': _safe_int(items[5], default=0),
+            'jobsize': _safe_int(items[6], default=0),
+            'partition_factor': _safe_int(items[7], default=0),
+        })
+    return pandas.DataFrame(rows, columns=columns)
+
 def get_scontrol_node_df(lines, partition_state_map=None):
     columns = [
         'queue_name',
@@ -524,14 +848,13 @@ def get_scontrol_node_df(lines, partition_state_map=None):
         ncore_resv = 0
         ncore_available = max(ncore_total - ncore_used - ncore_resv, 0)
         mem_total_mb = max(_safe_int(params.get('RealMemory', ''), default=0), 0)
-        mem_available_mb = _safe_int(params.get('FreeMem', ''), default=-1)
-        if mem_available_mb<0:
-            alloc_mem_mb = _safe_int(params.get('AllocMem', ''), default=-1)
-            if alloc_mem_mb>=0:
-                mem_available_mb = max(mem_total_mb - alloc_mem_mb, 0)
-            else:
-                mem_available_mb = 0
+        alloc_mem_mb = _safe_int(params.get('AllocMem', ''), default=-1)
+        if alloc_mem_mb>=0:
+            # Schedulable memory is constrained by Slurm's allocated memory,
+            # not by the OS-level free page count.
+            mem_available_mb = max(mem_total_mb - alloc_mem_mb, 0)
         else:
+            mem_available_mb = _safe_int(params.get('FreeMem', ''), default=0)
             mem_available_mb = max(mem_available_mb, 0)
         slurm_state = params.get('State', '')
         state_base = _normalize_slurm_node_state(slurm_state)
@@ -584,7 +907,7 @@ def _normalize_slurm_job_state(state_raw):
         state = m.group(1)
     return SLURM_STATE_NAME_TO_CODE.get(state, state)
 
-def print_queued_job_summary(df_user, scheduler='uge'):
+def print_queued_job_summary(df_user, scheduler='uge', current_user=''):
     if scheduler=='slurm':
         if df_user.shape[0]==0:
             print('No jobs found in squeue output.')
@@ -594,12 +917,24 @@ def print_queued_job_summary(df_user, scheduler='uge'):
         is_running = state_codes.isin(SLURM_RUNNING_STATES)
         is_qwaiting = state_codes.isin(SLURM_PENDING_STATES)
         is_error = state_codes.isin(SLURM_ERROR_STATES)
-        num_running = int(df_user.loc[is_running,'total_slots'].sum())
-        num_qwaiting = int(df_user.loc[is_qwaiting,'total_slots'].sum())
-        num_error = int(df_user.loc[is_error,'total_slots'].sum())
-        print('# of running job tasks (estimated from squeue): {}'.format(num_running))
-        print('# of queued job tasks (estimated from squeue): {}'.format(num_qwaiting))
-        print('# of failed/cancelled job tasks (estimated from squeue): {}'.format(num_error))
+        num_running = int(df_user.loc[is_running, 'total_slots'].sum())
+        num_qwaiting = int(df_user.loc[is_qwaiting, 'total_slots'].sum())
+        num_error = int(df_user.loc[is_error, 'total_slots'].sum())
+        if (current_user!='') and ('user' in df_user.columns):
+            is_self = (df_user['user'].fillna('')==current_user)
+            num_running_self = int(df_user.loc[is_running & is_self, 'total_slots'].sum())
+            num_qwaiting_self = int(df_user.loc[is_qwaiting & is_self, 'total_slots'].sum())
+            num_error_self = int(df_user.loc[is_error & is_self, 'total_slots'].sum())
+            print('# of running job tasks for current user (estimated from squeue): {}'.format(num_running_self))
+            print('# of running job tasks for all users (estimated from squeue): {}'.format(num_running))
+            print('# of queued job tasks for current user (estimated from squeue): {}'.format(num_qwaiting_self))
+            print('# of queued job tasks for all users (estimated from squeue): {}'.format(num_qwaiting))
+            print('# of failed/cancelled job tasks for current user (estimated from squeue): {}'.format(num_error_self))
+            print('# of failed/cancelled job tasks for all users (estimated from squeue): {}'.format(num_error))
+        else:
+            print('# of running job tasks (estimated from squeue): {}'.format(num_running))
+            print('# of queued job tasks (estimated from squeue): {}'.format(num_qwaiting))
+            print('# of failed/cancelled job tasks (estimated from squeue): {}'.format(num_error))
         num_estimated_rows = int(df_user['task_count_estimated'].sum())
         if num_estimated_rows>0:
             txt = 'Note: {} row(s) had truncated/irregular SLURM array IDs; task counts are estimated.'
@@ -615,6 +950,170 @@ def print_queued_job_summary(df_user, scheduler='uge'):
     print('# of CPUs in use for running jobs: {}'.format(num_running))
     print('# of requested CPUs for queued jobs: {}'.format(num_qwaiting))
     print('# of CPUs for queued/running jobs in error: {}'.format(num_error))
+    print('')
+
+def get_current_user_name():
+    user_name = os.environ.get('USER', '').strip()
+    if user_name!='':
+        return user_name
+    try:
+        return getpass.getuser().strip()
+    except Exception:
+        return ''
+
+def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=''):
+    columns = [
+        'queue_name',
+        'recommended_cores',
+        'recommended_mem_gib',
+        'top_node_name',
+        'top_node_cores',
+        'top_node_mem_gib',
+        'priority_gap',
+        'fairshare_gap',
+        'blocked_req_cores',
+        'blocked_req_mem_gib',
+        'blocked_time_limit',
+        'status',
+    ]
+    if (df_node is None) or (df_node.shape[0]==0):
+        return pandas.DataFrame(columns=columns)
+    rows = []
+    queue_names = sorted([q for q in df_node['queue_name'].dropna().unique().tolist() if not str(q).startswith('login')])
+    for queue_name in queue_names:
+        df_queue = df_node.loc[(df_node['queue_name']==queue_name) & (df_node['status']==''), :].copy()
+        if df_queue.shape[0]==0:
+            rows.append({
+                'queue_name': queue_name,
+                'recommended_cores': 0,
+                'recommended_mem_gib': 0.0,
+                'top_node_name': '',
+                'top_node_cores': 0,
+                'top_node_mem_gib': 0.0,
+                'priority_gap': None,
+                'fairshare_gap': None,
+                'blocked_req_cores': None,
+                'blocked_req_mem_gib': None,
+                'blocked_time_limit': '',
+                'status': 'no_normal_nodes',
+            })
+            continue
+        df_queue['available_mem_gib'] = _memory_series_to_gib(df_queue['hc:mem_req'])
+        df_queue = df_queue.sort_values(by=['ncore_available', 'available_mem_gib', 'node_name'], ascending=[False, False, True]).reset_index(drop=True)
+        top_node = df_queue.iloc[0]
+        top_node_cores = int(top_node['ncore_available'])
+        top_node_mem_gib = float(top_node['available_mem_gib'])
+        recommended_cores = top_node_cores
+        recommended_mem_gib = top_node_mem_gib
+        priority_gap = None
+        fairshare_gap = None
+        blocked_req_cores = None
+        blocked_req_mem_gib = None
+        blocked_time_limit = ''
+        status = 'resource_only'
+        if (current_user!='') and (df_job is not None) and (df_job.shape[0]>0):
+            state_codes = df_job['state'].fillna('').map(_normalize_slurm_job_state)
+            user_pending = df_job.loc[
+                (df_job['partition']==queue_name) &
+                (df_job['user']==current_user) &
+                state_codes.isin(SLURM_PENDING_STATES),
+                :
+            ].copy()
+            if user_pending.shape[0]>0:
+                if (df_prio is not None) and (df_prio.shape[0]>0):
+                    df_prio_queue = df_prio.loc[df_prio['partition']==queue_name, :].copy()
+                    if df_prio_queue.shape[0]>0:
+                        top_priority = int(df_prio_queue['priority'].max())
+                        top_fairshare = int(df_prio_queue['fairshare'].max())
+                        df_user_prio = df_prio_queue.loc[df_prio_queue['job_id'].isin(user_pending['job_id']), :].copy()
+                        if df_user_prio.shape[0]>0:
+                            user_best_priority = int(df_user_prio['priority'].max())
+                            user_best_fairshare = int(df_user_prio['fairshare'].max())
+                            priority_gap = top_priority - user_best_priority
+                            fairshare_gap = top_fairshare - user_best_fairshare
+                user_priority_pending = user_pending.loc[
+                    user_pending['pending_reason'].fillna('').str.contains('Priority', case=False, regex=False),
+                    :
+                ].copy()
+                if user_priority_pending.shape[0]>0:
+                    if 'resource_fields_complete' not in user_priority_pending.columns:
+                        user_priority_pending['resource_fields_complete'] = False
+                    valid_priority_pending = user_priority_pending.loc[
+                        user_priority_pending['resource_fields_complete'].fillna(False),
+                        :
+                    ].copy()
+                    recommended_cores = None
+                    recommended_mem_gib = None
+                    if valid_priority_pending.shape[0]>0:
+                        valid_priority_pending['req_mem_gib'] = _memory_series_to_gib(valid_priority_pending['req_mem'])
+                        valid_priority_pending['time_limit_minutes'] = valid_priority_pending['time_limit'].map(_slurm_time_to_minutes)
+                        valid_priority_pending = valid_priority_pending.sort_values(
+                            by=['req_cpus', 'req_mem_gib', 'time_limit_minutes', 'job_id'],
+                            ascending=[True, True, True, True],
+                        ).reset_index(drop=True)
+                        smallest = valid_priority_pending.iloc[0]
+                        blocked_req_cores = int(smallest['req_cpus'])
+                        blocked_req_mem_gib = float(smallest['req_mem_gib'])
+                        blocked_time_limit = str(smallest['time_limit']).strip()
+                        status = 'priority_blocked'
+                    else:
+                        status = 'priority_blocked_missing_fields'
+        rows.append({
+            'queue_name': queue_name,
+            'recommended_cores': recommended_cores,
+            'recommended_mem_gib': recommended_mem_gib,
+            'top_node_name': str(top_node['node_name']),
+            'top_node_cores': top_node_cores,
+            'top_node_mem_gib': top_node_mem_gib,
+            'priority_gap': priority_gap,
+            'fairshare_gap': fairshare_gap,
+            'blocked_req_cores': blocked_req_cores,
+            'blocked_req_mem_gib': blocked_req_mem_gib,
+            'blocked_time_limit': blocked_time_limit,
+            'status': status,
+        })
+    return pandas.DataFrame(rows, columns=columns)
+
+def print_slurm_launch_heuristic(df_launch, current_user=''):
+    if (df_launch is None) or (df_launch.shape[0]==0):
+        return
+    subject = 'current user'
+    if current_user!='':
+        subject = current_user
+    print('Reporting heuristic single-node launch ceilings for {} (reservation-adjusted, priority-aware):'.format(subject))
+    for i in df_launch.index:
+        queue_name = df_launch.at[i, 'queue_name']
+        recommended_cores = df_launch.at[i, 'recommended_cores']
+        recommended_mem_gib = df_launch.at[i, 'recommended_mem_gib']
+        top_node_name = df_launch.at[i, 'top_node_name']
+        top_node_cores = int(df_launch.at[i, 'top_node_cores'])
+        top_node_mem_gib = float(df_launch.at[i, 'top_node_mem_gib'])
+        status = str(df_launch.at[i, 'status'])
+        print('{}:'.format(queue_name))
+        if pandas.isna(recommended_cores):
+            print('  immediate-start ceiling: n/a')
+        else:
+            print('  immediate-start ceiling: <= {:,} CPUs and {:,.0f}G RAM'.format(int(recommended_cores), float(recommended_mem_gib)))
+        if top_node_name!='':
+            print('  top free node: {} has {:,} CPUs and {:,.0f}G RAM'.format(top_node_name, top_node_cores, top_node_mem_gib))
+        blocked_req_cores = df_launch.at[i, 'blocked_req_cores']
+        if pandas.notna(blocked_req_cores):
+            blocked_req_mem_gib = float(df_launch.at[i, 'blocked_req_mem_gib'])
+            blocked_time_limit = str(df_launch.at[i, 'blocked_time_limit']).strip()
+            blocked_txt = 'smallest current Priority-blocked request is {} CPUs / {:.0f}G'.format(int(blocked_req_cores), blocked_req_mem_gib)
+            if blocked_time_limit not in ['', 'nan']:
+                blocked_txt += ' / {}'.format(blocked_time_limit)
+            print('  {}'.format(blocked_txt))
+        priority_gap = df_launch.at[i, 'priority_gap']
+        if pandas.notna(priority_gap):
+            print('  priority gap: {}'.format(int(priority_gap)))
+        fairshare_gap = df_launch.at[i, 'fairshare_gap']
+        if pandas.notna(fairshare_gap):
+            print('  fairshare gap: {}'.format(int(fairshare_gap)))
+        if status=='priority_blocked':
+            print('  note: current user has Priority-blocked jobs; no stable immediate-start ceiling can be inferred')
+        if status=='priority_blocked_missing_fields':
+            print('  note: current user has Priority-blocked jobs, but request size is unavailable in the current squeue format')
     print('')
 
 def get_scheduler_from_command(stat_command):
@@ -651,6 +1150,29 @@ def _has_squeue_noheader_option(command):
             return True
     return False
 
+def _strip_squeue_parse_options(command):
+    stripped = [command[0]]
+    skip_next = False
+    for token in command[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in ['-h', '--noheader']:
+            continue
+        if token.startswith('--noheader='):
+            continue
+        if token in ['-o', '-O', '--format', '--Format']:
+            skip_next = True
+            continue
+        if token.startswith('--format=') or token.startswith('--Format='):
+            continue
+        if token.startswith('-o') and token!='-o':
+            continue
+        if token.startswith('-O') and token!='-O':
+            continue
+        stripped.append(token)
+    return stripped
+
 def get_squeue_command_for_parsing(stat_command):
     try:
         command = shlex.split(stat_command)
@@ -661,12 +1183,9 @@ def get_squeue_command_for_parsing(stat_command):
     executable = os.path.basename(command[0])
     if executable!='squeue':
         return stat_command
-    has_format_option = _has_squeue_format_option(command)
-    has_noheader_option = _has_squeue_noheader_option(command)
-    if not has_noheader_option:
-        command.append('-h')
-    if not has_format_option:
-        command.extend(['-o', SLURM_SQUEUE_PARSE_FIELDS])
+    command = _strip_squeue_parse_options(command)
+    command.append('-h')
+    command.extend(['-o', SLURM_SQUEUE_PARSE_FIELDS])
     return ' '.join([shlex.quote(item) for item in command])
 
 def get_command_stdout_lines(command_str, example_file='', allow_failure=False, command_name='command', quiet_failure=False):
@@ -675,61 +1194,51 @@ def get_command_stdout_lines(command_str, example_file='', allow_failure=False, 
             with open(example_file) as f:
                 return f.readlines()
         except OSError as e:
-            if not quiet_failure:
-                print('Failed to read example file for {}: {}'.format(command_name, example_file))
-                print(str(e))
             if allow_failure:
                 return None
-            exit(1)
+            summary = 'Failed to read example file for {}: {}'.format(command_name, example_file)
+            raise KFBatchCommandError(_format_error_message(summary, str(e), quiet=quiet_failure))
     try:
         command = shlex.split(command_str)
     except ValueError as e:
-        if not quiet_failure:
-            print('Failed to parse {}: {}'.format(command_name, command_str))
-            print(str(e))
         if allow_failure:
             return None
-        exit(1)
+        summary = 'Failed to parse {}: {}'.format(command_name, command_str)
+        raise KFBatchCommandError(_format_error_message(summary, str(e), quiet=quiet_failure))
     if len(command)==0:
-        if not quiet_failure:
-            print('Failed to run {}: command is empty'.format(command_name))
         if allow_failure:
             return None
-        exit(1)
+        summary = 'Failed to run {}: command is empty'.format(command_name)
+        raise KFBatchCommandError(_format_error_message(summary, quiet=quiet_failure))
     try:
         command_out = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as e:
-        if not quiet_failure:
-            print('Failed to run {}: {}'.format(command_name, command_str))
-            print(str(e))
         if allow_failure:
             return None
-        exit(1)
+        summary = 'Failed to run {}: {}'.format(command_name, command_str)
+        raise KFBatchCommandError(_format_error_message(summary, str(e), quiet=quiet_failure))
     if command_out.returncode!=0:
-        if not quiet_failure:
-            print('Failed to run {}: {}'.format(command_name, command_str))
-            command_stderr = command_out.stderr.decode('utf8')
-            if command_stderr!='':
-                print(command_stderr)
         if allow_failure:
             return None
-        exit(1)
+        command_stderr = command_out.stderr.decode('utf8').strip()
+        summary = 'Failed to run {}: {}'.format(command_name, command_str)
+        raise KFBatchCommandError(_format_error_message(summary, command_stderr, quiet=quiet_failure))
     command_stdout = command_out.stdout.decode('utf8')
     return command_stdout.split('\n')
 
 def get_df(args):
     scheduler = get_scheduler_from_command(args.stat_command)
     if scheduler is None:
-        print('Exiting. --stat_command does not support: {}'.format(args.stat_command))
-        exit(1)
+        raise KFBatchUsageError('Exiting. --stat_command does not support: {}'.format(args.stat_command))
     if scheduler=='slurm':
+        current_user = get_current_user_name()
         squeue_command = get_squeue_command_for_parsing(args.stat_command)
         lines = get_command_stdout_lines(command_str=squeue_command,
                                          example_file=args.example_file,
                                          allow_failure=False,
                                          command_name='--stat_command')
         df_user = get_squeue_user_df(lines)
-        print_queued_job_summary(df_user, scheduler='slurm')
+        print_queued_job_summary(df_user, scheduler='slurm', current_user=current_user)
         partition_lines = get_command_stdout_lines(command_str=args.slurm_partition_command,
                                                    example_file=args.slurm_partition_example_file,
                                                    allow_failure=True,
@@ -756,8 +1265,7 @@ def get_df(args):
             return scheduler, None, df_user
         return scheduler, df_slurm_node, df_user
     if args.niter<1:
-        print('Exiting. --niter must be >= 1 when using qstat mode.')
-        exit(1)
+        raise KFBatchUsageError('Exiting. --niter must be >= 1 when using qstat mode.')
     for i in range(args.niter):
         lines = get_command_stdout_lines(command_str=args.stat_command,
                                          example_file=args.example_file,
@@ -830,8 +1338,30 @@ def stat_main(args):
         if args.out!='':
             df_user.to_csv(args.out, sep='\t', index=False)
         return
+    if scheduler=='slurm':
+        reservation_lines = get_command_stdout_lines(command_str=args.slurm_reservation_command,
+                                                     example_file=args.slurm_reservation_example_file,
+                                                     allow_failure=True,
+                                                     command_name='--slurm_reservation_command',
+                                                     quiet_failure=True)
+        if reservation_lines is not None:
+            df_reservation = get_scontrol_reservation_df(reservation_lines)
+            if df_reservation.shape[0]>0:
+                df = apply_slurm_reservations(df, df_reservation)
     df = adjust_ram_unit(df)
     print_cluster_summary(df)
     print_resource_availability(df, args)
+    if scheduler=='slurm' and args.show_launch_heuristic:
+        prio_lines = get_command_stdout_lines(command_str=args.slurm_prio_command,
+                                              example_file=args.slurm_prio_example_file,
+                                              allow_failure=True,
+                                              command_name='--slurm_prio_command',
+                                              quiet_failure=True)
+        df_prio = None
+        if prio_lines is not None:
+            df_prio = get_sprio_df(prio_lines)
+        current_user = get_current_user_name()
+        df_launch = get_slurm_launch_heuristic_df(df_node=df, df_job=df_user, df_prio=df_prio, current_user=current_user)
+        print_slurm_launch_heuristic(df_launch, current_user=current_user)
     if args.out!='':
         df.to_csv(args.out, sep='\t', index=False)
