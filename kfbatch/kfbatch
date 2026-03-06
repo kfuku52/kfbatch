@@ -15,13 +15,6 @@ def parse_bool(value):
         return False
     raise argparse.ArgumentTypeError('Expected one of yes/no, true/false, on/off, or 1/0.')
 
-def _normalize_legacy_argv(argv):
-    if len(argv)>1 and argv[1]=='stat':
-        return [argv[0], ] + argv[2:]
-    if len(argv)>1 and argv[1]=='help':
-        return [argv[0], '-h']
-    return argv
-
 def _build_parser():
     parser = argparse.ArgumentParser(description='A toolkit for the batch job management.')
     parser.add_argument('--stat_command', metavar='command', default='squeue', type=str, required=False, action='store',
@@ -62,7 +55,7 @@ def _build_parser():
 def main(argv=None):
     if argv is None:
         argv = sys.argv
-    argv = _normalize_legacy_argv(list(argv))
+    argv = list(argv)
     parser = _build_parser()
     args = parser.parse_args(argv[1:])
     from kfbatch.stat import stat_main

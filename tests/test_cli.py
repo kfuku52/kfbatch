@@ -24,20 +24,10 @@ def _run_cli(args):
     )
 
 
-def test_kfbatch_direct_mode_matches_legacy_stat_alias():
-    args = [
-        "--example_file",
-        "data/qstat1/qstatF.txt",
-        "--stat_command",
-        "qstat -F",
-        "--niter",
-        "1",
-    ]
-    direct = _run_cli(args)
-    legacy = _run_cli(["stat"] + args)
-    assert direct.returncode == 0
-    assert legacy.returncode == 0
-    assert direct.stdout == legacy.stdout
+def test_legacy_stat_alias_is_rejected():
+    out = _run_cli(["stat", "--stat_command", "qstat -F"])
+    assert out.returncode != 0
+    assert "unrecognized arguments" in out.stderr
 
 
 def test_kfbatch_help_shows_stat_options_without_subcommands():
@@ -48,10 +38,10 @@ def test_kfbatch_help_shows_stat_options_without_subcommands():
     assert "subcommands" not in out.stdout.lower()
 
 
-def test_legacy_help_alias_maps_to_main_help():
+def test_legacy_help_alias_is_rejected():
     out = _run_cli(["help", "stat"])
-    assert out.returncode == 0
-    assert "--stat_command" in out.stdout
+    assert out.returncode != 0
+    assert "unrecognized arguments" in out.stderr
 
 
 def test_unknown_option_returns_nonzero():

@@ -925,19 +925,17 @@ def print_queued_job_summary(df_user, scheduler='uge', current_user=''):
             num_running_self = int(df_user.loc[is_running & is_self, 'total_slots'].sum())
             num_qwaiting_self = int(df_user.loc[is_qwaiting & is_self, 'total_slots'].sum())
             num_error_self = int(df_user.loc[is_error & is_self, 'total_slots'].sum())
-            print('# of running job tasks for current user (estimated from squeue): {}'.format(num_running_self))
-            print('# of running job tasks for all users (estimated from squeue): {}'.format(num_running))
-            print('# of queued job tasks for current user (estimated from squeue): {}'.format(num_qwaiting_self))
-            print('# of queued job tasks for all users (estimated from squeue): {}'.format(num_qwaiting))
-            print('# of failed/cancelled job tasks for current user (estimated from squeue): {}'.format(num_error_self))
-            print('# of failed/cancelled job tasks for all users (estimated from squeue): {}'.format(num_error))
+            print('jobs  self:R/Q/F={}/{}/{}  all:R/Q/F={}/{}/{}'.format(
+                num_running_self, num_qwaiting_self, num_error_self,
+                num_running, num_qwaiting, num_error,
+            ))
         else:
             print('# of running job tasks (estimated from squeue): {}'.format(num_running))
             print('# of queued job tasks (estimated from squeue): {}'.format(num_qwaiting))
             print('# of failed/cancelled job tasks (estimated from squeue): {}'.format(num_error))
         num_estimated_rows = int(df_user['task_count_estimated'].sum())
         if num_estimated_rows>0:
-            txt = 'Note: {} row(s) had truncated/irregular SLURM array IDs; task counts are estimated.'
+            txt = 'note: {} row(s) had truncated/irregular SLURM array IDs; task counts are estimated.'
             print(txt.format(num_estimated_rows))
         print('')
         return
@@ -1114,6 +1112,128 @@ def print_slurm_launch_heuristic(df_launch, current_user=''):
             print('  note: current user has Priority-blocked jobs; no stable immediate-start ceiling can be inferred')
         if status=='priority_blocked_missing_fields':
             print('  note: current user has Priority-blocked jobs, but request size is unavailable in the current squeue format')
+    print('')
+
+def _format_slurm_compact_time_limit(time_limit):
+    txt = str(time_limit).strip()
+    if txt in ['', 'nan', 'N/A', 'NOT_SET']:
+        return '?'
+    total_minutes = _slurm_time_to_minutes(txt)
+    if total_minutes==float('inf'):
+        return 'inf'
+    total_minutes = int(round(total_minutes))
+    days = int(total_minutes / (24 * 60))
+    rem_minutes = total_minutes - (days * 24 * 60)
+    hours = int(rem_minutes / 60)
+    minutes = rem_minutes - (hours * 60)
+    parts = []
+    if days>0:
+        parts.append('{}d'.format(days))
+    if hours>0:
+        parts.append('{}h'.format(hours))
+    if minutes>0 or len(parts)==0:
+        parts.append('{}m'.format(minutes))
+    return ''.join(parts[:2])
+
+def _format_slurm_compact_node(node_name, ncore_available, mem_gib):
+    if str(node_name).strip()=='':
+        return '-'
+    return '{} {}c/{:.0f}G'.format(node_name, int(ncore_available), float(mem_gib))
+
+def _format_slurm_compact_launch_row(row):
+    if row is None:
+        return '-'
+    status = str(row.get('status', '')).strip()
+    recommended_cores = row.get('recommended_cores', None)
+    recommended_mem_gib = row.get('recommended_mem_gib', None)
+    blocked_req_cores = row.get('blocked_req_cores', None)
+    blocked_req_mem_gib = row.get('blocked_req_mem_gib', None)
+    blocked_time_limit = row.get('blocked_time_limit', '')
+    priority_gap = row.get('priority_gap', None)
+    fairshare_gap = row.get('fairshare_gap', None)
+    if status in ['priority_blocked', 'priority_blocked_missing_fields']:
+        fields = ['PRIO']
+        if pandas.notna(blocked_req_cores):
+            fields.append('min={}c/{:.0f}G/{}'.format(
+                int(blocked_req_cores),
+                float(blocked_req_mem_gib),
+                _format_slurm_compact_time_limit(blocked_time_limit),
+            ))
+        else:
+            fields.append('min=?')
+        if pandas.notna(priority_gap):
+            fields.append('gap={}'.format(int(priority_gap)))
+        if pandas.notna(fairshare_gap):
+            fields.append('fs={}'.format(int(fairshare_gap)))
+        return ' '.join(fields)
+    if pandas.isna(recommended_cores):
+        return 'n/a'
+    return '<={}c/{:.0f}G'.format(int(recommended_cores), float(recommended_mem_gib))
+
+def print_slurm_compact_summary(df, df_launch, args):
+    queue_names = [ q for q in df['queue_name'].unique().tolist() if not str(q).startswith('login') ]
+    launch_rows = {}
+    if (df_launch is not None) and (df_launch.shape[0]>0):
+        for i in df_launch.index:
+            queue_name = df_launch.at[i, 'queue_name']
+            launch_rows[queue_name] = df_launch.loc[i, :].to_dict()
+    rows = []
+    for queue_name in queue_names:
+        df_queue = df.loc[(df['queue_name']==queue_name), :].reset_index(drop=True)
+        is_abnormal_status = (df_queue['status']!='')
+        num_abnormal_node = int(is_abnormal_status.sum())
+        num_node = int(df_queue.shape[0])
+        num_working_node = num_node - num_abnormal_node
+        ncore_total = int(df_queue.loc[:, 'ncore_total'].sum())
+        ncore_used = int(df_queue.loc[~is_abnormal_status, 'ncore_used'].sum())
+        ncore_available = int(df_queue.loc[~is_abnormal_status, 'ncore_available'].sum())
+        mem_total = float(df_queue.loc[:, 'hl:mem_total'].sum())
+        mem_available = float(df_queue.loc[~is_abnormal_status, 'hc:mem_req'].sum())
+        if args.exclude_abnormal_node:
+            df_normal = df_queue.loc[~is_abnormal_status, :].copy()
+        else:
+            df_normal = df_queue.copy()
+        if df_normal.shape[0]>0:
+            df_top_cpu = df_normal.sort_values(by=['ncore_available', 'hc:mem_req', 'node_name'], ascending=[False, False, True]).reset_index(drop=True)
+            df_top_ram = df_normal.sort_values(by=['hc:mem_req', 'ncore_available', 'node_name'], ascending=[False, False, True]).reset_index(drop=True)
+            top_cpu = _format_slurm_compact_node(df_top_cpu.at[0, 'node_name'], df_top_cpu.at[0, 'ncore_available'], df_top_cpu.at[0, 'hc:mem_req'])
+            top_ram = _format_slurm_compact_node(df_top_ram.at[0, 'node_name'], df_top_ram.at[0, 'ncore_available'], df_top_ram.at[0, 'hc:mem_req'])
+            if top_cpu==top_ram:
+                top_ram = 'same'
+        else:
+            top_cpu = '-'
+            top_ram = '-'
+        rows.append({
+            'part': str(queue_name),
+            'nodes': '{}/{}/{}'.format(num_working_node, num_abnormal_node, num_node),
+            'cpu(a/u/t)': '{}/{}/{}'.format(ncore_available, ncore_used, ncore_total),
+            'ram(a/t)G': '{:.0f}/{:.0f}'.format(mem_available, mem_total),
+            'topCPU': top_cpu,
+            'topRAM': top_ram,
+            'launch': _format_slurm_compact_launch_row(launch_rows.get(queue_name)),
+        })
+    if len(rows)==0:
+        return
+    columns = ['part', 'nodes', 'cpu(a/u/t)', 'ram(a/t)G', 'topCPU', 'topRAM', 'launch']
+    widths = {}
+    for col in columns:
+        widths[col] = len(col)
+        for row in rows:
+            widths[col] = max(widths[col], len(str(row[col])))
+    header = '  '.join([columns[0].ljust(widths[columns[0]])] + [col.ljust(widths[col]) for col in columns[1:]])
+    print(header)
+    for row in rows:
+        print('  '.join([
+            str(row['part']).ljust(widths['part']),
+            str(row['nodes']).ljust(widths['nodes']),
+            str(row['cpu(a/u/t)']).ljust(widths['cpu(a/u/t)']),
+            str(row['ram(a/t)G']).ljust(widths['ram(a/t)G']),
+            str(row['topCPU']).ljust(widths['topCPU']),
+            str(row['topRAM']).ljust(widths['topRAM']),
+            str(row['launch']).ljust(widths['launch']),
+        ]))
+    print('')
+    print('legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/total')
     print('')
 
 def get_scheduler_from_command(stat_command):
@@ -1349,8 +1469,6 @@ def stat_main(args):
             if df_reservation.shape[0]>0:
                 df = apply_slurm_reservations(df, df_reservation)
     df = adjust_ram_unit(df)
-    print_cluster_summary(df)
-    print_resource_availability(df, args)
     if scheduler=='slurm' and args.show_launch_heuristic:
         prio_lines = get_command_stdout_lines(command_str=args.slurm_prio_command,
                                               example_file=args.slurm_prio_example_file,
@@ -1362,6 +1480,9 @@ def stat_main(args):
             df_prio = get_sprio_df(prio_lines)
         current_user = get_current_user_name()
         df_launch = get_slurm_launch_heuristic_df(df_node=df, df_job=df_user, df_prio=df_prio, current_user=current_user)
-        print_slurm_launch_heuristic(df_launch, current_user=current_user)
+        print_slurm_compact_summary(df, df_launch, args)
+    else:
+        print_cluster_summary(df)
+        print_resource_availability(df, args)
     if args.out!='':
         df.to_csv(args.out, sep='\t', index=False)
