@@ -300,7 +300,7 @@ def test_get_sprio_df_parses_pending_priority_table():
     assert int(df.at[0, "fairshare"]) == 2708
 
 
-def test_get_slurm_launch_heuristic_returns_na_when_priority_blocks_even_tiny_job():
+def test_get_slurm_launch_heuristic_keeps_resource_ceiling_when_priority_blocks_even_tiny_job():
     df_node = pandas.DataFrame(
         {
             "queue_name": ["epyc"],
@@ -333,15 +333,56 @@ def test_get_slurm_launch_heuristic_returns_na_when_priority_blocks_even_tiny_jo
     )
     out = get_slurm_launch_heuristic_df(df_node=df_node, df_job=df_job, df_prio=df_prio, current_user="kfuku")
     assert out.shape[0] == 1
-    assert pandas.isna(out.at[0, "recommended_cores"])
-    assert pandas.isna(out.at[0, "recommended_mem_gib"])
+    assert int(out.at[0, "recommended_cores"]) == 67
+    assert float(out.at[0, "recommended_mem_gib"]) == 925.0
     assert out.at[0, "status"] == "priority_blocked"
     assert int(out.at[0, "priority_gap"]) == 3931
     assert int(out.at[0, "fairshare_gap"]) == 3926
     assert int(out.at[0, "top_node_cores"]) == 67
 
 
-def test_get_slurm_launch_heuristic_returns_na_without_zero_sized_request_for_legacy_rows():
+def test_get_slurm_launch_heuristic_matches_multi_partition_pending_jobs():
+    df_node = pandas.DataFrame(
+        {
+            "queue_name": ["epyc"],
+            "node_name": ["a004"],
+            "status": [""],
+            "ncore_available": [128],
+            "hc:mem_req": ["516G"],
+        }
+    )
+    df_job = pandas.DataFrame(
+        {
+            "job_id": ["15243876"],
+            "partition": ["medium,rome,epyc"],
+            "user": ["kfuku"],
+            "state": ["PD"],
+            "req_cpus": [1],
+            "req_mem": ["1G"],
+            "time_limit": ["00:05:00"],
+            "pending_reason": ["Priority"],
+            "resource_fields_complete": [True],
+        }
+    )
+    df_prio = pandas.DataFrame(
+        {
+            "job_id": ["15243876", "topjob"],
+            "partition": ["medium,rome,epyc", "epyc"],
+            "priority": [14951, 16652],
+            "fairshare": [5597, 6634],
+        }
+    )
+    out = get_slurm_launch_heuristic_df(df_node=df_node, df_job=df_job, df_prio=df_prio, current_user="kfuku")
+    assert out.shape[0] == 1
+    assert out.at[0, "status"] == "priority_blocked"
+    assert int(out.at[0, "recommended_cores"]) == 128
+    assert float(out.at[0, "recommended_mem_gib"]) == 516.0
+    assert int(out.at[0, "blocked_req_cores"]) == 1
+    assert int(out.at[0, "priority_gap"]) == 1701
+    assert int(out.at[0, "fairshare_gap"]) == 1037
+
+
+def test_get_slurm_launch_heuristic_keeps_resource_ceiling_without_zero_sized_request_for_legacy_rows():
     df_node = pandas.DataFrame(
         {
             "queue_name": ["epyc"],
@@ -366,7 +407,7 @@ def test_get_slurm_launch_heuristic_returns_na_without_zero_sized_request_for_le
     )
     out = get_slurm_launch_heuristic_df(df_node=df_node, df_job=df_job, current_user="kfuku")
     assert out.shape[0] == 1
-    assert pandas.isna(out.at[0, "recommended_cores"])
+    assert int(out.at[0, "recommended_cores"]) == 67
     assert pandas.isna(out.at[0, "blocked_req_cores"])
     assert out.at[0, "status"] == "priority_blocked_missing_fields"
 
@@ -503,8 +544,8 @@ def test_print_slurm_launch_heuristic_uses_multiline_blocks(capsys):
     df_launch = pandas.DataFrame(
         {
             "queue_name": ["epyc"],
-            "recommended_cores": [None],
-            "recommended_mem_gib": [None],
+            "recommended_cores": [59],
+            "recommended_mem_gib": [925.0],
             "top_node_name": ["a004"],
             "top_node_cores": [59],
             "top_node_mem_gib": [925.0],
@@ -519,7 +560,7 @@ def test_print_slurm_launch_heuristic_uses_multiline_blocks(capsys):
     print_slurm_launch_heuristic(df_launch, current_user="kfuku")
     out = capsys.readouterr().out
     assert "epyc:\n" in out
-    assert "  immediate-start ceiling: n/a\n" in out
+    assert "  resource-only ceiling: <= 59 CPUs and 925G RAM\n" in out
     assert "  top free node: a004 has 59 CPUs and 925G RAM\n" in out
     assert "  smallest current Priority-blocked request is 1 CPUs / 1G / 00:05:00\n" in out
     assert "  note: current user has Priority-blocked jobs; no stable immediate-start ceiling can be inferred\n" in out
@@ -542,8 +583,8 @@ def test_print_slurm_compact_summary_uses_single_row_per_partition(capsys):
     df_launch = pandas.DataFrame(
         {
             "queue_name": ["epyc", "rome"],
-            "recommended_cores": [None, None],
-            "recommended_mem_gib": [None, None],
+            "recommended_cores": [14, 103],
+            "recommended_mem_gib": [5.0, 12.0],
             "top_node_name": ["a004", "at141"],
             "top_node_cores": [14, 103],
             "top_node_mem_gib": [5.0, 12.0],
@@ -564,7 +605,8 @@ def test_print_slurm_compact_summary_uses_single_row_per_partition(capsys):
     assert "epyc" in out
     assert "a004 14c/5G" in out
     assert "a017 0c/352G" in out
-    assert "PRIO min=1c/1G/5m gap=18097 fs=17960" in out
+    assert "<=14c/5G PRIO min=1c/1G/5m gap=18097 fs=17960" in out
+    assert "<=103c/12G PRIO min=1c/1G/5m gap=1701 fs=1037" in out
     assert "legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/total" in out
 
 
