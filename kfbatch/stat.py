@@ -959,6 +959,21 @@ def get_current_user_name():
     except Exception:
         return ''
 
+def _split_slurm_partition_field(partition_field):
+    partitions = []
+    for token in str(partition_field or '').split(','):
+        partition = token.strip().rstrip('*')
+        if partition in ['', '(null)', 'N/A']:
+            continue
+        partitions.append(partition)
+    return partitions
+
+def _slurm_partition_field_matches(partition_field, queue_name):
+    queue_name = str(queue_name or '').strip().rstrip('*')
+    if queue_name=='':
+        return False
+    return queue_name in _split_slurm_partition_field(partition_field)
+
 def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=''):
     columns = [
         'queue_name',
@@ -1011,15 +1026,17 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=''
         status = 'resource_only'
         if (current_user!='') and (df_job is not None) and (df_job.shape[0]>0):
             state_codes = df_job['state'].fillna('').map(_normalize_slurm_job_state)
+            job_partition_matches = df_job['partition'].map(lambda partition: _slurm_partition_field_matches(partition, queue_name))
             user_pending = df_job.loc[
-                (df_job['partition']==queue_name) &
+                job_partition_matches &
                 (df_job['user']==current_user) &
                 state_codes.isin(SLURM_PENDING_STATES),
                 :
             ].copy()
             if user_pending.shape[0]>0:
                 if (df_prio is not None) and (df_prio.shape[0]>0):
-                    df_prio_queue = df_prio.loc[df_prio['partition']==queue_name, :].copy()
+                    prio_partition_matches = df_prio['partition'].map(lambda partition: _slurm_partition_field_matches(partition, queue_name))
+                    df_prio_queue = df_prio.loc[prio_partition_matches, :].copy()
                     if df_prio_queue.shape[0]>0:
                         top_priority = int(df_prio_queue['priority'].max())
                         top_fairshare = int(df_prio_queue['fairshare'].max())
@@ -1040,8 +1057,6 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=''
                         user_priority_pending['resource_fields_complete'].fillna(False),
                         :
                     ].copy()
-                    recommended_cores = None
-                    recommended_mem_gib = None
                     if valid_priority_pending.shape[0]>0:
                         valid_priority_pending['req_mem_gib'] = _memory_series_to_gib(valid_priority_pending['req_mem'])
                         valid_priority_pending['time_limit_minutes'] = valid_priority_pending['time_limit'].map(_slurm_time_to_minutes)
@@ -1090,6 +1105,8 @@ def print_slurm_launch_heuristic(df_launch, current_user=''):
         print('{}:'.format(queue_name))
         if pandas.isna(recommended_cores):
             print('  immediate-start ceiling: n/a')
+        elif status in ['priority_blocked', 'priority_blocked_missing_fields']:
+            print('  resource-only ceiling: <= {:,} CPUs and {:,.0f}G RAM'.format(int(recommended_cores), float(recommended_mem_gib)))
         else:
             print('  immediate-start ceiling: <= {:,} CPUs and {:,.0f}G RAM'.format(int(recommended_cores), float(recommended_mem_gib)))
         if top_node_name!='':
@@ -1151,8 +1168,12 @@ def _format_slurm_compact_launch_row(row):
     blocked_time_limit = row.get('blocked_time_limit', '')
     priority_gap = row.get('priority_gap', None)
     fairshare_gap = row.get('fairshare_gap', None)
+    if pandas.isna(recommended_cores):
+        resource_fields = ['n/a']
+    else:
+        resource_fields = ['<={}c/{:.0f}G'.format(int(recommended_cores), float(recommended_mem_gib))]
     if status in ['priority_blocked', 'priority_blocked_missing_fields']:
-        fields = ['PRIO']
+        fields = resource_fields + ['PRIO']
         if pandas.notna(blocked_req_cores):
             fields.append('min={}c/{:.0f}G/{}'.format(
                 int(blocked_req_cores),
@@ -1166,9 +1187,7 @@ def _format_slurm_compact_launch_row(row):
         if pandas.notna(fairshare_gap):
             fields.append('fs={}'.format(int(fairshare_gap)))
         return ' '.join(fields)
-    if pandas.isna(recommended_cores):
-        return 'n/a'
-    return '<={}c/{:.0f}G'.format(int(recommended_cores), float(recommended_mem_gib))
+    return resource_fields[0]
 
 def print_slurm_compact_summary(df, df_launch, args):
     queue_names = [ q for q in df['queue_name'].unique().tolist() if not str(q).startswith('login') ]
