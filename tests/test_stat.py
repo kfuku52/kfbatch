@@ -334,6 +334,7 @@ def test_get_slurm_launch_heuristic_keeps_resource_ceiling_when_priority_blocks_
     out = get_slurm_launch_heuristic_df(df_node=df_node, df_job=df_job, df_prio=df_prio, current_user="kfuku")
     assert out.shape[0] == 1
     assert int(out.at[0, "recommended_cores"]) == 67
+    assert float(out.at[0, "recommended_mem_gb"]) == 925.0
     assert float(out.at[0, "recommended_mem_gib"]) == 925.0
     assert out.at[0, "status"] == "priority_blocked"
     assert int(out.at[0, "priority_gap"]) == 3931
@@ -376,6 +377,7 @@ def test_get_slurm_launch_heuristic_matches_multi_partition_pending_jobs():
     assert out.shape[0] == 1
     assert out.at[0, "status"] == "priority_blocked"
     assert int(out.at[0, "recommended_cores"]) == 128
+    assert float(out.at[0, "recommended_mem_gb"]) == 516.0
     assert float(out.at[0, "recommended_mem_gib"]) == 516.0
     assert int(out.at[0, "blocked_req_cores"]) == 1
     assert int(out.at[0, "priority_gap"]) == 1701
@@ -493,7 +495,7 @@ def test_get_qstat_df_clips_negative_available_and_fills_missing_memory():
     assert df.at[0, "hl:mem_total"] == "8.000G"
 
 
-def test_adjust_ram_unit_converts_mib_to_gib_consistently():
+def test_adjust_ram_unit_converts_memory_to_decimal_gb_consistently():
     df = pandas.DataFrame(
         {
             "hc:mem_req": ["500M", "1.5G", "2T"],
