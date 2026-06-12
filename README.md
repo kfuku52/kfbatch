@@ -1,6 +1,8 @@
 [![Tests](https://github.com/kfuku52/kfbatch/actions/workflows/tests.yml/badge.svg)](https://github.com/kfuku52/kfbatch/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://github.com/kfuku52/kfbatch/blob/master/.github/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/kfuku52/kfbatch/blob/master/LICENSE)
+[![Schedulers](https://img.shields.io/badge/schedulers-SLURM%20%7C%20UGE%2FSGE-orange)](#overview)
+[![Wheel](https://img.shields.io/badge/wheel-PEP%20517-2ea44f)](https://peps.python.org/pep-0517/)
 
 ## Overview
 
@@ -113,6 +115,8 @@ legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/to
   is the minimum seen across iterations.
 - In SLURM mode, old or truncated `squeue` formats are still accepted for parsing, but the launch
   heuristic falls back to `n/a` if request-size fields are unavailable.
+- Memory values are normalized to decimal GB for display and TSV output, matching common scheduler
+  `G/M/K/T` conventions where `1G = 1000M`.
 - `kfbatch` is primarily maintained for the author's own cluster workflows, so site-specific output
   formats may still require custom command options.
 

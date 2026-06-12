@@ -182,7 +182,7 @@ def get_qstat_df(lines):
     df = df.sort_values(by=['queue_name','node_name']).reset_index(drop=True)
     return df
 
-def _memory_series_to_gib(series):
+def _memory_series_to_gb(series):
     raw = series.fillna('').astype(str).str.strip()
     units = raw.str.extract(r'([A-Za-z]+)$', expand=False).fillna('').str.upper()
     numeric_txt = raw.str.replace(r'[A-Za-z]+$', '', regex=True)
@@ -198,7 +198,10 @@ def _memory_series_to_gib(series):
         values.loc[is_k] = values.loc[is_k] * 0.000001
     return values
 
-def _memory_text_to_gib(value):
+def _memory_series_to_gib(series):
+    return _memory_series_to_gb(series)
+
+def _memory_text_to_gb(value):
     if value is None:
         return 0.0
     txt = str(value).strip()
@@ -219,8 +222,11 @@ def _memory_text_to_gib(value):
         return number * 0.000001
     return number
 
+def _memory_text_to_gib(value):
+    return _memory_text_to_gb(value)
+
 def _memory_text_to_mb(value):
-    return int(round(_memory_text_to_gib(value) * 1000.0))
+    return int(round(_memory_text_to_gb(value) * 1000.0))
 
 def _extract_tres_resource_value(tres_txt, resource_name):
     txt = str(tres_txt).strip()
@@ -283,8 +289,8 @@ def _merge_qstat_iteration_min_availability(df, df_i):
     new_cores = pandas.to_numeric(df_new.loc[common_index, 'ncore_available'], errors='coerce').fillna(0)
     min_cores = pandas.concat([base_cores, new_cores], axis=1).min(axis=1)
     df_base.loc[common_index, 'ncore_available'] = min_cores.astype(int)
-    base_mem = _memory_series_to_gib(df_base.loc[common_index, 'hc:mem_req'])
-    new_mem = _memory_series_to_gib(df_new.loc[common_index, 'hc:mem_req'])
+    base_mem = _memory_series_to_gb(df_base.loc[common_index, 'hc:mem_req'])
+    new_mem = _memory_series_to_gb(df_new.loc[common_index, 'hc:mem_req'])
     min_mem = pandas.concat([base_mem, new_mem], axis=1).min(axis=1)
     df_base.loc[common_index, 'hc:mem_req'] = min_mem.map(lambda x: '{:.3f}G'.format(float(x)))
     df_base = df_base.reset_index(drop=True)
@@ -397,6 +403,48 @@ def estimate_slurm_task_count(job_id):
     is_estimated = has_ambiguous_pattern or (not has_closing_bracket)
     return num_tasks, is_estimated
 
+def _split_squeue_row(line):
+    if '\t' in line:
+        return line.split('\t'), '\t'
+    if '\\t' in line:
+        # Some captured files may contain literal "\t" separators.
+        return line.split('\\t'), '\\t'
+    return re.split(r'\s+', line.strip(), maxsplit=10), ' '
+
+def _parse_squeue_row_items(items, rest_separator):
+    items = [str(item).strip() for item in items]
+    if len(items)>=11:
+        return {
+            'resource_fields_complete': True,
+            'job_id': items[0],
+            'partition': items[1],
+            'name': items[2],
+            'user': items[3],
+            'state': items[4],
+            'elapsed_time': items[5],
+            'num_nodes_txt': items[6],
+            'req_cpus_txt': items[7],
+            'req_mem': items[8],
+            'time_limit': items[9],
+            'node_or_reason': rest_separator.join(items[10:]).strip(),
+        }
+    if len(items)>=8:
+        return {
+            'resource_fields_complete': False,
+            'job_id': items[0],
+            'partition': items[1],
+            'name': items[2],
+            'user': items[3],
+            'state': items[4],
+            'elapsed_time': items[5],
+            'num_nodes_txt': items[6],
+            'req_cpus_txt': '',
+            'req_mem': '',
+            'time_limit': '',
+            'node_or_reason': rest_separator.join(items[7:]).strip(),
+        }
+    return None
+
 def get_squeue_user_df(lines):
     columns = [
         'job_id',
@@ -422,118 +470,31 @@ def get_squeue_user_df(lines):
             continue
         if line.lstrip().startswith('JOBID '):
             continue
-        if '\t' in line:
-            items = line.split('\t')
-            if len(items)>=11:
-                resource_fields_complete = True
-                job_id = items[0].strip()
-                partition = items[1].strip()
-                name = items[2].strip()
-                user = items[3].strip()
-                state = items[4].strip()
-                elapsed_time = items[5].strip()
-                num_nodes_txt = items[6].strip()
-                req_cpus_txt = items[7].strip()
-                req_mem = items[8].strip()
-                time_limit = items[9].strip()
-                node_or_reason = '\t'.join(items[10:]).strip()
-            elif len(items)>=8:
-                resource_fields_complete = False
-                job_id = items[0].strip()
-                partition = items[1].strip()
-                name = items[2].strip()
-                user = items[3].strip()
-                state = items[4].strip()
-                elapsed_time = items[5].strip()
-                num_nodes_txt = items[6].strip()
-                req_cpus_txt = ''
-                req_mem = ''
-                time_limit = ''
-                node_or_reason = '\t'.join(items[7:]).strip()
-            else:
-                continue
-        elif '\\t' in line:
-            # Some captured files may contain literal "\t" separators.
-            items = line.split('\\t')
-            if len(items)>=11:
-                resource_fields_complete = True
-                job_id = items[0].strip()
-                partition = items[1].strip()
-                name = items[2].strip()
-                user = items[3].strip()
-                state = items[4].strip()
-                elapsed_time = items[5].strip()
-                num_nodes_txt = items[6].strip()
-                req_cpus_txt = items[7].strip()
-                req_mem = items[8].strip()
-                time_limit = items[9].strip()
-                node_or_reason = '\\t'.join(items[10:]).strip()
-            elif len(items)>=8:
-                resource_fields_complete = False
-                job_id = items[0].strip()
-                partition = items[1].strip()
-                name = items[2].strip()
-                user = items[3].strip()
-                state = items[4].strip()
-                elapsed_time = items[5].strip()
-                num_nodes_txt = items[6].strip()
-                req_cpus_txt = ''
-                req_mem = ''
-                time_limit = ''
-                node_or_reason = '\\t'.join(items[7:]).strip()
-            else:
-                continue
-        else:
-            items = re.split(r'\s+', line.strip(), maxsplit=10)
-            if len(items)>=11:
-                resource_fields_complete = True
-                job_id = items[0]
-                partition = items[1]
-                name = items[2]
-                user = items[3]
-                state = items[4]
-                elapsed_time = items[5]
-                num_nodes_txt = items[6]
-                req_cpus_txt = items[7]
-                req_mem = items[8]
-                time_limit = items[9]
-                node_or_reason = items[10]
-            elif len(items)>=8:
-                resource_fields_complete = False
-                job_id = items[0]
-                partition = items[1]
-                name = items[2]
-                user = items[3]
-                state = items[4]
-                elapsed_time = items[5]
-                num_nodes_txt = items[6]
-                req_cpus_txt = ''
-                req_mem = ''
-                time_limit = ''
-                node_or_reason = items[7]
-            else:
-                continue
+        items, rest_separator = _split_squeue_row(line)
+        row = _parse_squeue_row_items(items, rest_separator)
+        if row is None:
+            continue
         try:
-            num_nodes = int(num_nodes_txt)
+            num_nodes = int(row['num_nodes_txt'])
         except ValueError:
             num_nodes = 1
-        req_cpus = _safe_int(req_cpus_txt, default=0)
-        num_tasks, is_estimated = estimate_slurm_task_count(job_id)
+        req_cpus = _safe_int(row['req_cpus_txt'], default=0)
+        num_tasks, is_estimated = estimate_slurm_task_count(row['job_id'])
         total_slots = num_tasks
         table.append({
-            'job_id': job_id,
-            'partition': partition,
-            'name': name,
-            'user': user,
-            'state': state,
-            'elapsed_time': elapsed_time,
+            'job_id': row['job_id'],
+            'partition': row['partition'],
+            'name': row['name'],
+            'user': row['user'],
+            'state': row['state'],
+            'elapsed_time': row['elapsed_time'],
             'num_nodes': num_nodes,
             'req_cpus': req_cpus,
-            'req_mem': req_mem,
-            'time_limit': time_limit,
-            'node_or_reason': node_or_reason,
-            'pending_reason': _extract_slurm_pending_reason(node_or_reason),
-            'resource_fields_complete': resource_fields_complete,
+            'req_mem': row['req_mem'],
+            'time_limit': row['time_limit'],
+            'node_or_reason': row['node_or_reason'],
+            'pending_reason': _extract_slurm_pending_reason(row['node_or_reason']),
+            'resource_fields_complete': row['resource_fields_complete'],
             'total_slots': total_slots,
             'task_count_estimated': is_estimated,
         })
@@ -978,13 +939,16 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=''
     columns = [
         'queue_name',
         'recommended_cores',
+        'recommended_mem_gb',
         'recommended_mem_gib',
         'top_node_name',
         'top_node_cores',
+        'top_node_mem_gb',
         'top_node_mem_gib',
         'priority_gap',
         'fairshare_gap',
         'blocked_req_cores',
+        'blocked_req_mem_gb',
         'blocked_req_mem_gib',
         'blocked_time_limit',
         'status',
@@ -999,29 +963,32 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=''
             rows.append({
                 'queue_name': queue_name,
                 'recommended_cores': 0,
+                'recommended_mem_gb': 0.0,
                 'recommended_mem_gib': 0.0,
                 'top_node_name': '',
                 'top_node_cores': 0,
+                'top_node_mem_gb': 0.0,
                 'top_node_mem_gib': 0.0,
                 'priority_gap': None,
                 'fairshare_gap': None,
                 'blocked_req_cores': None,
+                'blocked_req_mem_gb': None,
                 'blocked_req_mem_gib': None,
                 'blocked_time_limit': '',
                 'status': 'no_normal_nodes',
             })
             continue
-        df_queue['available_mem_gib'] = _memory_series_to_gib(df_queue['hc:mem_req'])
-        df_queue = df_queue.sort_values(by=['ncore_available', 'available_mem_gib', 'node_name'], ascending=[False, False, True]).reset_index(drop=True)
+        df_queue['available_mem_gb'] = _memory_series_to_gb(df_queue['hc:mem_req'])
+        df_queue = df_queue.sort_values(by=['ncore_available', 'available_mem_gb', 'node_name'], ascending=[False, False, True]).reset_index(drop=True)
         top_node = df_queue.iloc[0]
         top_node_cores = int(top_node['ncore_available'])
-        top_node_mem_gib = float(top_node['available_mem_gib'])
+        top_node_mem_gb = float(top_node['available_mem_gb'])
         recommended_cores = top_node_cores
-        recommended_mem_gib = top_node_mem_gib
+        recommended_mem_gb = top_node_mem_gb
         priority_gap = None
         fairshare_gap = None
         blocked_req_cores = None
-        blocked_req_mem_gib = None
+        blocked_req_mem_gb = None
         blocked_time_limit = ''
         status = 'resource_only'
         if (current_user!='') and (df_job is not None) and (df_job.shape[0]>0):
@@ -1058,15 +1025,15 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=''
                         :
                     ].copy()
                     if valid_priority_pending.shape[0]>0:
-                        valid_priority_pending['req_mem_gib'] = _memory_series_to_gib(valid_priority_pending['req_mem'])
+                        valid_priority_pending['req_mem_gb'] = _memory_series_to_gb(valid_priority_pending['req_mem'])
                         valid_priority_pending['time_limit_minutes'] = valid_priority_pending['time_limit'].map(_slurm_time_to_minutes)
                         valid_priority_pending = valid_priority_pending.sort_values(
-                            by=['req_cpus', 'req_mem_gib', 'time_limit_minutes', 'job_id'],
+                            by=['req_cpus', 'req_mem_gb', 'time_limit_minutes', 'job_id'],
                             ascending=[True, True, True, True],
                         ).reset_index(drop=True)
                         smallest = valid_priority_pending.iloc[0]
                         blocked_req_cores = int(smallest['req_cpus'])
-                        blocked_req_mem_gib = float(smallest['req_mem_gib'])
+                        blocked_req_mem_gb = float(smallest['req_mem_gb'])
                         blocked_time_limit = str(smallest['time_limit']).strip()
                         status = 'priority_blocked'
                     else:
@@ -1074,18 +1041,28 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=''
         rows.append({
             'queue_name': queue_name,
             'recommended_cores': recommended_cores,
-            'recommended_mem_gib': recommended_mem_gib,
+            'recommended_mem_gb': recommended_mem_gb,
+            'recommended_mem_gib': recommended_mem_gb,
             'top_node_name': str(top_node['node_name']),
             'top_node_cores': top_node_cores,
-            'top_node_mem_gib': top_node_mem_gib,
+            'top_node_mem_gb': top_node_mem_gb,
+            'top_node_mem_gib': top_node_mem_gb,
             'priority_gap': priority_gap,
             'fairshare_gap': fairshare_gap,
             'blocked_req_cores': blocked_req_cores,
-            'blocked_req_mem_gib': blocked_req_mem_gib,
+            'blocked_req_mem_gb': blocked_req_mem_gb,
+            'blocked_req_mem_gib': blocked_req_mem_gb,
             'blocked_time_limit': blocked_time_limit,
             'status': status,
         })
     return pandas.DataFrame(rows, columns=columns)
+
+def _get_launch_value(df_launch, row_index, preferred_col, legacy_col=None):
+    if preferred_col in df_launch.columns:
+        return df_launch.at[row_index, preferred_col]
+    if (legacy_col is not None) and (legacy_col in df_launch.columns):
+        return df_launch.at[row_index, legacy_col]
+    return None
 
 def print_slurm_launch_heuristic(df_launch, current_user=''):
     if (df_launch is None) or (df_launch.shape[0]==0):
@@ -1097,25 +1074,25 @@ def print_slurm_launch_heuristic(df_launch, current_user=''):
     for i in df_launch.index:
         queue_name = df_launch.at[i, 'queue_name']
         recommended_cores = df_launch.at[i, 'recommended_cores']
-        recommended_mem_gib = df_launch.at[i, 'recommended_mem_gib']
+        recommended_mem_gb = _get_launch_value(df_launch, i, 'recommended_mem_gb', 'recommended_mem_gib')
         top_node_name = df_launch.at[i, 'top_node_name']
         top_node_cores = int(df_launch.at[i, 'top_node_cores'])
-        top_node_mem_gib = float(df_launch.at[i, 'top_node_mem_gib'])
+        top_node_mem_gb = float(_get_launch_value(df_launch, i, 'top_node_mem_gb', 'top_node_mem_gib'))
         status = str(df_launch.at[i, 'status'])
         print('{}:'.format(queue_name))
         if pandas.isna(recommended_cores):
             print('  immediate-start ceiling: n/a')
         elif status in ['priority_blocked', 'priority_blocked_missing_fields']:
-            print('  resource-only ceiling: <= {:,} CPUs and {:,.0f}G RAM'.format(int(recommended_cores), float(recommended_mem_gib)))
+            print('  resource-only ceiling: <= {:,} CPUs and {:,.0f}G RAM'.format(int(recommended_cores), float(recommended_mem_gb)))
         else:
-            print('  immediate-start ceiling: <= {:,} CPUs and {:,.0f}G RAM'.format(int(recommended_cores), float(recommended_mem_gib)))
+            print('  immediate-start ceiling: <= {:,} CPUs and {:,.0f}G RAM'.format(int(recommended_cores), float(recommended_mem_gb)))
         if top_node_name!='':
-            print('  top free node: {} has {:,} CPUs and {:,.0f}G RAM'.format(top_node_name, top_node_cores, top_node_mem_gib))
+            print('  top free node: {} has {:,} CPUs and {:,.0f}G RAM'.format(top_node_name, top_node_cores, top_node_mem_gb))
         blocked_req_cores = df_launch.at[i, 'blocked_req_cores']
         if pandas.notna(blocked_req_cores):
-            blocked_req_mem_gib = float(df_launch.at[i, 'blocked_req_mem_gib'])
+            blocked_req_mem_gb = float(_get_launch_value(df_launch, i, 'blocked_req_mem_gb', 'blocked_req_mem_gib'))
             blocked_time_limit = str(df_launch.at[i, 'blocked_time_limit']).strip()
-            blocked_txt = 'smallest current Priority-blocked request is {} CPUs / {:.0f}G'.format(int(blocked_req_cores), blocked_req_mem_gib)
+            blocked_txt = 'smallest current Priority-blocked request is {} CPUs / {:.0f}G'.format(int(blocked_req_cores), blocked_req_mem_gb)
             if blocked_time_limit not in ['', 'nan']:
                 blocked_txt += ' / {}'.format(blocked_time_limit)
             print('  {}'.format(blocked_txt))
@@ -1152,32 +1129,32 @@ def _format_slurm_compact_time_limit(time_limit):
         parts.append('{}m'.format(minutes))
     return ''.join(parts[:2])
 
-def _format_slurm_compact_node(node_name, ncore_available, mem_gib):
+def _format_slurm_compact_node(node_name, ncore_available, mem_gb):
     if str(node_name).strip()=='':
         return '-'
-    return '{} {}c/{:.0f}G'.format(node_name, int(ncore_available), float(mem_gib))
+    return '{} {}c/{:.0f}G'.format(node_name, int(ncore_available), float(mem_gb))
 
 def _format_slurm_compact_launch_row(row):
     if row is None:
         return '-'
     status = str(row.get('status', '')).strip()
     recommended_cores = row.get('recommended_cores', None)
-    recommended_mem_gib = row.get('recommended_mem_gib', None)
+    recommended_mem_gb = row.get('recommended_mem_gb', row.get('recommended_mem_gib', None))
     blocked_req_cores = row.get('blocked_req_cores', None)
-    blocked_req_mem_gib = row.get('blocked_req_mem_gib', None)
+    blocked_req_mem_gb = row.get('blocked_req_mem_gb', row.get('blocked_req_mem_gib', None))
     blocked_time_limit = row.get('blocked_time_limit', '')
     priority_gap = row.get('priority_gap', None)
     fairshare_gap = row.get('fairshare_gap', None)
     if pandas.isna(recommended_cores):
         resource_fields = ['n/a']
     else:
-        resource_fields = ['<={}c/{:.0f}G'.format(int(recommended_cores), float(recommended_mem_gib))]
+        resource_fields = ['<={}c/{:.0f}G'.format(int(recommended_cores), float(recommended_mem_gb))]
     if status in ['priority_blocked', 'priority_blocked_missing_fields']:
         fields = resource_fields + ['PRIO']
         if pandas.notna(blocked_req_cores):
             fields.append('min={}c/{:.0f}G/{}'.format(
                 int(blocked_req_cores),
-                float(blocked_req_mem_gib),
+                float(blocked_req_mem_gb),
                 _format_slurm_compact_time_limit(blocked_time_limit),
             ))
         else:
