@@ -1,0 +1,7 @@
+Account|User|RawShares|NormShares|RawUsage|EffectvUsage|FairShare
+general_analysis||1|0.040000|1000000|0.800000|
+ general_analysis|alice|1|0.000429|100|0.000001|0.900000
+ general_analysis|bob|1|0.000429|200|0.000002|0.500000
+ general_analysis|smallwoods|1|0.000429|300|0.000003|0.006098
+ general_analysis|kfuku|1|0.000429|41192861|0.015753|0.005691
+ general_analysis|zeta|1|0.000429|50000000|0.020000|0.001000

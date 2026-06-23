@@ -17,8 +17,11 @@ from kfbatch.stat import (
     get_scheduler_from_command,
     get_scontrol_reservation_df,
     get_slurm_launch_heuristic_df,
+    get_slurm_fairshare_rank_summary,
     get_sprio_df,
+    get_sshare_df,
     print_slurm_compact_summary,
+    print_slurm_fairshare_rank_summary,
     print_queued_job_summary,
     print_slurm_launch_heuristic,
     get_user_df,
@@ -126,10 +129,11 @@ def test_get_squeue_user_df_marks_truncated_array_as_estimated():
 
 def test_get_squeue_user_df_parses_extended_slurm_fields():
     lines = [
-        "15243876\tepyc\twrap\tkfuku\tPD\t0:00\t1\t1\t1G\t00:05:00\t(Priority)",
+        "15243876\tepyc\twrap\tkfuku\tgeneral_analysis\tPD\t0:00\t1\t1\t1G\t00:05:00\t(Priority)",
     ]
     df = get_squeue_user_df(lines)
     assert df.shape[0] == 1
+    assert df.at[0, "account"] == "general_analysis"
     assert int(df.at[0, "req_cpus"]) == 1
     assert df.at[0, "req_mem"] == "1G"
     assert df.at[0, "time_limit"] == "00:05:00"
@@ -146,6 +150,16 @@ def test_get_squeue_user_df_marks_legacy_slurm_fields_as_incomplete():
     assert int(df.at[0, "req_cpus"]) == 0
     assert df.at[0, "req_mem"] == ""
     assert bool(df.at[0, "resource_fields_complete"]) is False
+
+
+def test_get_squeue_user_df_keeps_legacy_account_empty():
+    lines = [
+        "15243876\tepyc\twrap\tkfuku\tPD\t0:00\t1\t1\t1G\t00:05:00\t(Priority)",
+    ]
+    df = get_squeue_user_df(lines)
+    assert df.shape[0] == 1
+    assert df.at[0, "account"] == ""
+    assert df.at[0, "pending_reason"] == "Priority"
 
 
 def test_get_scontrol_node_df_skips_nodes_without_partition_and_marks_reserved():
@@ -298,6 +312,63 @@ def test_get_sprio_df_parses_pending_priority_table():
     assert df.at[0, "job_id"] == "15243876"
     assert int(df.at[0, "priority"]) == 12721
     assert int(df.at[0, "fairshare"]) == 2708
+
+
+def test_get_sshare_df_parses_pipe_output_and_skips_account_summary():
+    lines = [
+        "Account|User|RawShares|NormShares|RawUsage|EffectvUsage|FairShare",
+        "general_analysis||1|0.040000|1000000|0.800000|",
+        " general_analysis|kfuku|1|0.000429|41192861|0.015753|0.005691",
+    ]
+    df = get_sshare_df(lines)
+    assert df.shape[0] == 1
+    assert df.at[0, "account"] == "general_analysis"
+    assert df.at[0, "user"] == "kfuku"
+    assert float(df.at[0, "fairshare"]) == pytest.approx(0.005691)
+
+
+def test_get_slurm_fairshare_rank_summary_reports_overall_and_pending_ranks():
+    df_job = pandas.DataFrame(
+        {
+            "job_id": ["1", "2", "3"],
+            "user": ["alice", "kfuku", "zeta"],
+            "account": ["general_analysis", "general_analysis", "general_analysis"],
+            "state": ["PD", "PD", "R"],
+        }
+    )
+    df_share = get_sshare_df(
+        [
+            "Account|User|RawShares|NormShares|RawUsage|EffectvUsage|FairShare",
+            " general_analysis|alice|1|0.1|100|0.001|0.900000",
+            " general_analysis|bob|1|0.1|200|0.002|0.500000",
+            " general_analysis|kfuku|1|0.1|300|0.003|0.005691",
+            " general_analysis|zeta|1|0.1|400|0.004|0.001000",
+        ]
+    )
+    summary = get_slurm_fairshare_rank_summary(df_job=df_job, df_share=df_share, current_user="kfuku")
+    assert summary["overall_rank"] == 3
+    assert summary["overall_total"] == 4
+    assert summary["pending_rank"] == 2
+    assert summary["pending_total"] == 2
+
+
+def test_print_slurm_fairshare_rank_summary_uses_compact_single_line(capsys):
+    print_slurm_fairshare_rank_summary(
+        {
+            "account": "general_analysis",
+            "fairshare": 0.005691,
+            "overall_rank": 41,
+            "overall_total": 52,
+            "pending_rank": 12,
+            "pending_total": 20,
+            "pending_missing": 0,
+        }
+    )
+    out = capsys.readouterr().out
+    assert "fairshare  self=0.005691" in out
+    assert "account=general_analysis" in out
+    assert "all_rank=41/52" in out
+    assert "pending_rank=12/20" in out
 
 
 def test_get_slurm_launch_heuristic_keeps_resource_ceiling_when_priority_blocks_even_tiny_job():

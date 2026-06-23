@@ -13,9 +13,9 @@ It supports both:
 - `SLURM` via `squeue`
 - `UGE/SGE` via `qstat -F`
 
-On SLURM, `kfbatch` can also combine node state, partition state, active reservations, and
-`sprio` output to show a reservation-adjusted, priority-aware single-node launch heuristic
-for the current user.
+On SLURM, `kfbatch` can also combine node state, partition state, active reservations,
+`sprio` output, and `sshare` output to show a reservation-adjusted, priority-aware
+single-node launch heuristic and the current user's FairShare rank.
 
 ## Installation
 
@@ -37,6 +37,7 @@ Depending on the scheduler, `kfbatch` reports:
 - cluster-wide node, CPU, and RAM summaries
 - on SLURM, a compact one-row-per-partition table
 - on SLURM, a per-partition launch heuristic for the current user
+- on SLURM, the current user's FairShare rank among all users and among users with pending jobs
 
 In SLURM mode, task counts are shown for both the current user and all users.
 
@@ -62,7 +63,8 @@ SLURM with the default live commands:
 kfbatch \
   --stat_command "squeue" \
   --slurm_node_command "scontrol show node -o" \
-  --slurm_partition_command "scontrol show partition -o"
+  --slurm_partition_command "scontrol show partition -o" \
+  --slurm_share_command "sshare -a -P"
 ```
 
 SLURM with fixture files for debugging:
@@ -72,7 +74,8 @@ kfbatch \
   --example_file squeue_notrunc.txt \
   --stat_command "squeue" \
   --slurm_node_example_file scontrol_show_node_o.txt \
-  --slurm_partition_example_file scontrol_show_partition_o.txt
+  --slurm_partition_example_file scontrol_show_partition_o.txt \
+  --slurm_share_example_file sshare.txt
 ```
 
 UGE using a single snapshot instead of repeated polling:
@@ -100,6 +103,8 @@ kfbatch --show_launch_heuristic no
 ```text
 jobs  self:R/Q/F=0/5/0  all:R/Q/F=239/7318/0
 
+fairshare  self=0.005691  account=general_analysis  all_rank=2312/2325  pending_rank=41/52
+
 part    nodes    cpu(a/u/t)   ram(a/t)G  topCPU         topRAM         launch
 epyc    3/10/13  14/321/2159  451/17112  a004 14c/5G    a017 0c/352G   PRIO min=1c/1G/5m gap=18097 fs=17960
 rome    5/1/6    458/182/768  104/3093   at141 103c/12G at139 94c/49G  PRIO min=1c/1G/5m gap=1701 fs=1037
@@ -113,6 +118,8 @@ legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/to
 - `kfbatch` auto-detects the scheduler from `--stat_command`.
 - In UGE mode, `--niter` controls how many times `qstat -F` is sampled; the reported availability
   is the minimum seen across iterations.
+- In SLURM mode, FairShare rank is shown when `sshare -a -P` is available. It is skipped quietly
+  when the command is unavailable or the current user is absent from the share table.
 - In SLURM mode, old or truncated `squeue` formats are still accepted for parsing, but the launch
   heuristic falls back to `n/a` if request-size fields are unavailable.
 - Memory values are normalized to decimal GB for display and TSV output, matching common scheduler
