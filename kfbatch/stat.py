@@ -63,7 +63,7 @@ SLURM_UNAVAILABLE_NODE_FLAGS = {
     'PLANNED',
     'RESERVED',
 }
-SLURM_SQUEUE_PARSE_FIELDS = '%i\t%P\t%j\t%u\t%t\t%M\t%D\t%C\t%m\t%l\t%R'
+SLURM_SQUEUE_PARSE_FIELDS = '%i\t%P\t%j\t%u\t%a\t%t\t%M\t%D\t%C\t%m\t%l\t%R'
 QSTAT_REQUIRED_NODE_FIELDS = {
     'queue_name',
     'node_name',
@@ -409,10 +409,30 @@ def _split_squeue_row(line):
     if '\\t' in line:
         # Some captured files may contain literal "\t" separators.
         return line.split('\\t'), '\\t'
-    return re.split(r'\s+', line.strip(), maxsplit=10), ' '
+    return re.split(r'\s+', line.strip(), maxsplit=11), ' '
+
+def _looks_like_slurm_state_token(value):
+    return re.match(r'^[A-Za-z_]+$', str(value or '').strip()) is not None
 
 def _parse_squeue_row_items(items, rest_separator):
     items = [str(item).strip() for item in items]
+    has_account = (len(items)>=12 and _looks_like_slurm_state_token(items[5]))
+    if has_account:
+        return {
+            'resource_fields_complete': True,
+            'job_id': items[0],
+            'partition': items[1],
+            'name': items[2],
+            'user': items[3],
+            'account': items[4],
+            'state': items[5],
+            'elapsed_time': items[6],
+            'num_nodes_txt': items[7],
+            'req_cpus_txt': items[8],
+            'req_mem': items[9],
+            'time_limit': items[10],
+            'node_or_reason': rest_separator.join(items[11:]).strip(),
+        }
     if len(items)>=11:
         return {
             'resource_fields_complete': True,
@@ -420,6 +440,7 @@ def _parse_squeue_row_items(items, rest_separator):
             'partition': items[1],
             'name': items[2],
             'user': items[3],
+            'account': '',
             'state': items[4],
             'elapsed_time': items[5],
             'num_nodes_txt': items[6],
@@ -435,6 +456,7 @@ def _parse_squeue_row_items(items, rest_separator):
             'partition': items[1],
             'name': items[2],
             'user': items[3],
+            'account': '',
             'state': items[4],
             'elapsed_time': items[5],
             'num_nodes_txt': items[6],
@@ -451,6 +473,7 @@ def get_squeue_user_df(lines):
         'partition',
         'name',
         'user',
+        'account',
         'state',
         'elapsed_time',
         'num_nodes',
@@ -486,6 +509,7 @@ def get_squeue_user_df(lines):
             'partition': row['partition'],
             'name': row['name'],
             'user': row['user'],
+            'account': row['account'],
             'state': row['state'],
             'elapsed_time': row['elapsed_time'],
             'num_nodes': num_nodes,
@@ -771,6 +795,47 @@ def get_sprio_df(lines):
         })
     return pandas.DataFrame(rows, columns=columns)
 
+def get_sshare_df(lines):
+    columns = [
+        'account',
+        'user',
+        'raw_shares',
+        'norm_shares',
+        'raw_usage',
+        'effective_usage',
+        'fairshare',
+    ]
+    rows = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line=='':
+            continue
+        if line.startswith('Account|'):
+            continue
+        items = line.split('|')
+        if len(items)<7:
+            continue
+        account = items[0].strip()
+        user = items[1].strip()
+        if user=='':
+            continue
+        rows.append({
+            'account': account,
+            'user': user,
+            'raw_shares': _safe_int(items[2], default=0),
+            'norm_shares': pandas.to_numeric(items[3], errors='coerce'),
+            'raw_usage': pandas.to_numeric(items[4], errors='coerce'),
+            'effective_usage': pandas.to_numeric(items[5], errors='coerce'),
+            'fairshare': pandas.to_numeric(items[6], errors='coerce'),
+        })
+    df = pandas.DataFrame(rows, columns=columns)
+    if df.shape[0]==0:
+        return df
+    for col in ['norm_shares', 'raw_usage', 'effective_usage', 'fairshare']:
+        df[col] = pandas.to_numeric(df[col], errors='coerce')
+    df = df.loc[df['fairshare'].notna(), :].copy()
+    return df.reset_index(drop=True)
+
 def get_scontrol_node_df(lines, partition_state_map=None):
     columns = [
         'queue_name',
@@ -919,6 +984,145 @@ def get_current_user_name():
         return getpass.getuser().strip()
     except Exception:
         return ''
+
+def _rank_fairshare_rows(df_share):
+    if (df_share is None) or (df_share.shape[0]==0):
+        return pandas.DataFrame(columns=['account', 'user', 'fairshare', 'raw_usage', 'effective_usage', 'fairshare_rank'])
+    df = df_share.copy()
+    df = df.loc[df['fairshare'].notna(), :].copy()
+    df = df.sort_values(by=['fairshare', 'user', 'account'], ascending=[False, True, True]).reset_index(drop=True)
+    df['fairshare_rank'] = range(1, df.shape[0] + 1)
+    return df
+
+def _resolve_fairshare_account(df_share, user, account=''):
+    account = str(account or '').strip()
+    user = str(user or '').strip()
+    if account!='':
+        return account
+    if (df_share is None) or (df_share.shape[0]==0) or user=='':
+        return ''
+    matches = df_share.loc[df_share['user']==user, 'account'].dropna().astype(str).str.strip().unique().tolist()
+    matches = [value for value in matches if value!='']
+    if len(matches)==1:
+        return matches[0]
+    return ''
+
+def _current_user_fairshare_account(df_job, df_share, current_user):
+    if current_user=='':
+        return ''
+    accounts = []
+    if (df_job is not None) and (df_job.shape[0]>0) and ('user' in df_job.columns):
+        df_current = df_job.loc[df_job['user'].fillna('')==current_user, :].copy()
+        if df_current.shape[0]>0:
+            account_series = df_current['account'] if 'account' in df_current.columns else pandas.Series([''] * df_current.shape[0])
+            account_values = account_series.fillna('').astype(str).str.strip()
+            nonempty = sorted([value for value in account_values.unique().tolist() if value!=''])
+            if len(nonempty)>0:
+                accounts = nonempty
+    if len(accounts)>0:
+        return accounts[0]
+    return _resolve_fairshare_account(df_share, current_user)
+
+def get_slurm_fairshare_rank_summary(df_job, df_share, current_user=''):
+    if current_user=='' or (df_share is None) or (df_share.shape[0]==0):
+        return None
+    df_ranked = _rank_fairshare_rows(df_share)
+    if df_ranked.shape[0]==0:
+        return None
+    current_account = _current_user_fairshare_account(df_job, df_share, current_user)
+    if current_account!='':
+        current_rows = df_ranked.loc[
+            (df_ranked['user']==current_user) & (df_ranked['account']==current_account),
+            :
+        ].copy()
+    else:
+        current_rows = df_ranked.loc[df_ranked['user']==current_user, :].copy()
+    if current_rows.shape[0]==0:
+        return None
+    current_row = current_rows.sort_values(by=['fairshare_rank']).iloc[0]
+    current_account = str(current_row['account'])
+
+    pending_rank = None
+    pending_total = 0
+    pending_missing = 0
+    if (df_job is not None) and (df_job.shape[0]>0) and ('user' in df_job.columns):
+        state_codes = df_job['state'].fillna('').map(_normalize_slurm_job_state)
+        df_pending = df_job.loc[state_codes.isin(SLURM_PENDING_STATES), :].copy()
+        pairs = []
+        seen = set()
+        for _, row in df_pending.iterrows():
+            user = str(row.get('user', '') or '').strip()
+            account = str(row.get('account', '') or '').strip()
+            if user=='':
+                continue
+            account = _resolve_fairshare_account(df_share, user, account)
+            key = (user, account)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append(key)
+        pending_rows = []
+        for user, account in pairs:
+            if account!='':
+                matched = df_ranked.loc[(df_ranked['user']==user) & (df_ranked['account']==account), :].copy()
+            else:
+                matched = df_ranked.loc[df_ranked['user']==user, :].copy()
+            if matched.shape[0]==0:
+                pending_missing += 1
+                continue
+            pending_rows.append(matched.sort_values(by=['fairshare_rank']).iloc[0].to_dict())
+        if len(pending_rows)>0:
+            df_pending_ranked = pandas.DataFrame(pending_rows)
+            df_pending_ranked = df_pending_ranked.sort_values(
+                by=['fairshare', 'user', 'account'],
+                ascending=[False, True, True],
+            ).reset_index(drop=True)
+            df_pending_ranked['pending_fairshare_rank'] = range(1, df_pending_ranked.shape[0] + 1)
+            pending_total = int(df_pending_ranked.shape[0])
+            current_pending = df_pending_ranked.loc[
+                (df_pending_ranked['user']==current_user) & (df_pending_ranked['account']==current_account),
+                :
+            ]
+            if current_pending.shape[0]==0:
+                current_pending = df_pending_ranked.loc[df_pending_ranked['user']==current_user, :]
+            if current_pending.shape[0]>0:
+                pending_rank = int(current_pending.sort_values(by=['pending_fairshare_rank']).iloc[0]['pending_fairshare_rank'])
+
+    return {
+        'user': current_user,
+        'account': current_account,
+        'fairshare': float(current_row['fairshare']),
+        'overall_rank': int(current_row['fairshare_rank']),
+        'overall_total': int(df_ranked.shape[0]),
+        'pending_rank': pending_rank,
+        'pending_total': pending_total,
+        'pending_missing': pending_missing,
+        'raw_usage': current_row.get('raw_usage', None),
+        'effective_usage': current_row.get('effective_usage', None),
+    }
+
+def print_slurm_fairshare_rank_summary(summary):
+    if summary is None:
+        return
+    fields = [
+        'fairshare',
+        'self={:.6f}'.format(float(summary['fairshare'])),
+    ]
+    account = str(summary.get('account', '') or '').strip()
+    if account!='':
+        fields.append('account={}'.format(account))
+    fields.append('all_rank={}/{}'.format(int(summary['overall_rank']), int(summary['overall_total'])))
+    pending_rank = summary.get('pending_rank', None)
+    pending_total = int(summary.get('pending_total', 0) or 0)
+    if pending_rank is not None and pending_total>0:
+        fields.append('pending_rank={}/{}'.format(int(pending_rank), pending_total))
+    elif pending_total>0:
+        fields.append('pending_rank=n/a/{}'.format(pending_total))
+    pending_missing = int(summary.get('pending_missing', 0) or 0)
+    if pending_missing>0:
+        fields.append('pending_missing_fairshare={}'.format(pending_missing))
+    print('  '.join(fields))
+    print('')
 
 def _split_slurm_partition_field(partition_field):
     partitions = []
@@ -1355,6 +1559,20 @@ def get_df(args):
                                          command_name='--stat_command')
         df_user = get_squeue_user_df(lines)
         print_queued_job_summary(df_user, scheduler='slurm', current_user=current_user)
+        if getattr(args, 'show_fairshare_rank', True):
+            share_lines = get_command_stdout_lines(command_str=getattr(args, 'slurm_share_command', 'sshare -a -P'),
+                                                   example_file=getattr(args, 'slurm_share_example_file', ''),
+                                                   allow_failure=True,
+                                                   command_name='--slurm_share_command',
+                                                   quiet_failure=True)
+            if share_lines is not None:
+                df_share = get_sshare_df(share_lines)
+                fairshare_summary = get_slurm_fairshare_rank_summary(
+                    df_job=df_user,
+                    df_share=df_share,
+                    current_user=current_user,
+                )
+                print_slurm_fairshare_rank_summary(fairshare_summary)
         partition_lines = get_command_stdout_lines(command_str=args.slurm_partition_command,
                                                    example_file=args.slurm_partition_example_file,
                                                    allow_failure=True,

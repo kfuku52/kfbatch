@@ -18,12 +18,14 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI_PATH = REPO_ROOT / "kfbatch" / "kfbatch"
 
 
-def _run_cli(args):
+def _run_cli(args, extra_env=None):
     env = os.environ.copy()
     pythonpath = str(REPO_ROOT)
     if env.get("PYTHONPATH"):
         pythonpath += os.pathsep + env["PYTHONPATH"]
     env["PYTHONPATH"] = pythonpath
+    if extra_env is not None:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(CLI_PATH)] + args,
         cwd=str(REPO_ROOT),
@@ -163,6 +165,28 @@ def test_slurm_cli_uses_compact_partition_table():
     assert "cpu(a/u/t)" in out.stdout
     assert "ram(a/t)G" in out.stdout
     assert "launch" in out.stdout
+
+
+def test_slurm_cli_reports_fairshare_ranks_from_fixture():
+    out = _run_cli(
+        [
+            "--example_file",
+            "squeue_fairshare.txt",
+            "--stat_command",
+            "squeue",
+            "--slurm_node_example_file",
+            "scontrol_show_node_o.txt",
+            "--slurm_partition_example_file",
+            "scontrol_show_partition_o.txt",
+            "--slurm_share_example_file",
+            "sshare.txt",
+        ],
+        extra_env={"USER": "kfuku"},
+    )
+    assert out.returncode == 0
+    assert "fairshare  self=0.005691" in out.stdout
+    assert "all_rank=4/5" in out.stdout
+    assert "pending_rank=2/2" in out.stdout
 
 
 def test_qstat_cli_writes_valid_tsv(tmp_path):

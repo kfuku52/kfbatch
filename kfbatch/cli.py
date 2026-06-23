@@ -36,6 +36,10 @@ def _build_parser():
                         help='default=%(default)s: Command for SLURM pending-job priority breakdown.')
     parser.add_argument('--slurm_prio_example_file', metavar='PATH', default='', type=str, required=False, action='store',
                         help='default=%(default)s: PATH to a file with --slurm_prio_command stdout.')
+    parser.add_argument('--slurm_share_command', metavar='command', default='sshare -a -P', type=str, required=False, action='store',
+                        help='default=%(default)s: Command for SLURM FairShare account/user data.')
+    parser.add_argument('--slurm_share_example_file', metavar='PATH', default='', type=str, required=False, action='store',
+                        help='default=%(default)s: PATH to a file with --slurm_share_command stdout.')
     parser.add_argument('--ntop', metavar='INT', default=3, type=int, required=False, action='store',
                         help='default=%(default)s: Number of top available nodes to print.')
     parser.add_argument('--all_tiers', metavar='[yes,no]', default='no', type=parse_bool, required=False, action='store',
@@ -48,6 +52,8 @@ def _build_parser():
                         help='default=%(default)s: Whether to report nodes with abnormal status, such as a(larm) and d(isabled).')
     parser.add_argument('--show_launch_heuristic', metavar='[yes,no]', default='yes', type=parse_bool, required=False, action='store',
                         help='default=%(default)s: Whether to show reservation-adjusted, priority-aware SLURM launch ceilings.')
+    parser.add_argument('--show_fairshare_rank', metavar='[yes,no]', default='yes', type=parse_bool, required=False, action='store',
+                        help='default=%(default)s: Whether to show current-user SLURM FairShare rank among all users and pending-job users.')
     return parser
 
 
