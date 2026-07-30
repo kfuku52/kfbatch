@@ -21,6 +21,8 @@ currently exposes AGE/UGE commands and does not provide Slurm commands on its lo
 nodes. Optional site commands can be disabled or may degrade independently; the
 report labels unavailable or untrusted data instead of treating it as free capacity.
 
+Large scheduler reports are parsed with bounded memory use.
+
 ## Installation
 
 Python 3.10 or newer is required.
@@ -181,6 +183,12 @@ python -m ruff check .
 python -m ruff format --check .
 python -m pytest --cov=kfbatch --cov-branch
 python -m build
+```
+
+Performance-sensitive changes can be checked with:
+
+```bash
+python -m benchmarks.benchmark_parsers
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and

@@ -5,9 +5,12 @@ from types import SimpleNamespace
 import pandas
 import pytest
 
+import kfbatch.command as command_module
 import kfbatch.stat as stat_module
+from kfbatch.command import decode_scheduler_output
 from kfbatch.memory import floor_gib, memory_text_to_gib, slurm_request_memory_gib
 from kfbatch.stat import (
+    QSTAT_COLUMNS,
     SLURM_SQUEUE_PARSE_FIELDS,
     KFBatchCommandError,
     KFBatchUsageError,
@@ -34,6 +37,17 @@ from kfbatch.stat import (
     print_slurm_fairshare_rank_summary,
     print_uge_compact_summary,
 )
+
+
+class OneShotIterable:
+    def __init__(self, values):
+        self.values = values
+        self.started = False
+
+    def __iter__(self):
+        assert not self.started, "input was traversed more than once"
+        self.started = True
+        return iter(self.values)
 
 
 def test_get_scheduler_from_command_accepts_full_path():
@@ -118,6 +132,27 @@ def test_get_command_stdout_lines_replaces_invalid_utf8(tmp_path):
         command_name="fixture",
     )
     assert lines == ["valid", "invalid-\ufffd-name"]
+
+
+def test_get_command_stdout_lines_spools_large_output(monkeypatch):
+    monkeypatch.setattr(command_module, "STDOUT_SPOOL_MEMORY_LIMIT_BYTES", 16)
+    code = "import sys; sys.stdout.write('first\\n' + 'x' * 64 + '\\nlast')"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+    lines = get_command_stdout_lines(command, command_name="large fixture")
+    assert lines == ["first", "x" * 64, "last"]
+
+
+def test_decode_scheduler_output_falls_back_from_unknown_locale(monkeypatch):
+    monkeypatch.setattr(command_module.locale, "getpreferredencoding", lambda _do_setlocale: "x")
+    assert decode_scheduler_output("日本語".encode()) == "日本語"
+
+
+def test_get_command_stdout_lines_bounds_error_detail(monkeypatch):
+    monkeypatch.setattr(command_module, "STDERR_DETAIL_LIMIT_BYTES", 8)
+    code = "import sys; sys.stderr.write('0123456789'); raise SystemExit(2)"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+    with pytest.raises(KFBatchCommandError, match=r"01234567\n\[stderr truncated\]"):
+        get_command_stdout_lines(command, command_name="failed fixture")
 
 
 def test_get_command_stdout_lines_times_out():
@@ -873,6 +908,21 @@ def test_get_qstat_df_clips_negative_available_and_preserves_unknown_memory():
     assert pandas.isna(df.at[0, "hc:mem_req"])
     assert bool(df.at[0, "hc:mem_req_known"]) is False
     assert df.at[0, "hl:mem_total"] == "8.000G"
+
+
+def test_get_qstat_df_streams_once_and_discards_unneeded_resources():
+    lines = OneShotIterable(
+        [
+            "epyc.q@node01 BP 0/1/2 0.10 lx-amd64",
+            "\thc:mem_req=4.000G",
+            "\thl:mem_total=8.000G",
+            "\thl:unused_large_resource=123456",
+        ]
+    )
+    df = get_qstat_df(lines)
+    assert list(df.columns) == QSTAT_COLUMNS
+    assert df.at[0, "hc:mem_req"] == "4.000G"
+    assert "hl:unused_large_resource" not in df.columns
 
 
 def test_adjust_ram_unit_converts_memory_to_binary_gib_consistently():
