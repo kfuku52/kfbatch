@@ -1,0 +1,3 @@
+PartitionName=login Default=NO State=INACTIVE TotalCPUs=8 TotalNodes=1 Nodes=login01
+PartitionName=epyc Default=YES State=UP TotalCPUs=64 TotalNodes=2 Nodes=compute[01-02]
+PartitionName=short Default=NO State=UP TotalCPUs=16 TotalNodes=1 Nodes=compute03

@@ -1,0 +1,15 @@
+SUMMARY OF RUNNING JOBS
+                    user_a   group_a QUOTA      ALL
+        QNAME       JOBS      JOBS  LIMIT     JOBS AVAIL STDBY   TOTAL
+------------- -------------------- ------ ----------------------------
+      mjobs.q          4         8    128       64    24    16     256
+       intr.q          0         0     24        1     7     0       8
+THE NUMBER OF RUNNING JOBS BY USER IN THE GROUP (group_a)
+====================== QUOTA BY MEM_REQ =====================
+SUMMARY OF RUNNING JOBS ( MEM_REQ )
+                    user_a   group_a QUOTA      ALL
+        QNAME    MEM_REQ   MEM_REQ  LIMIT  MEM_REQ AVAIL STDBY   TOTAL
+------------- -------------------- ------ ----------------------------
+      mjobs.q          8        16      -      128    24    16     512
+       intr.q          0         0      -        2     7     0      32
+THE NUMBER OF MEM_REQ BY USER IN THE GROUP (group_a)

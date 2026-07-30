@@ -1,0 +1,12 @@
+queuename                      qtype resv/used/tot. np_load  arch          states
+---------------------------------------------------------------------------------
+mjobs.q@compute01              BP    0/6/16         0.30     lx-amd64
+	hl:arch=lx-amd64
+	hl:num_proc=16
+	hl:mem_total=64.000G
+	hc:mem_req=20.000G
+intr.q@compute02               BP    0/2/8          0.20     lx-amd64      d
+	hl:arch=lx-amd64
+	hl:num_proc=8
+	hl:mem_total=32.000G
+	hc:mem_req=16.000G

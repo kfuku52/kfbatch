@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kfbatch"
 dynamic = ["version"]
-description = "Batch job management"
+description = "Compact resource summaries for SLURM and Grid Engine batch clusters"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -13,15 +13,25 @@ license-files = ["LICENSE"]
 authors = [
     {name = "Kenji Fukushima", email = "kfuku52@gmail.com"},
 ]
-keywords = ["batch", "cluster", "slurm", "uge", "sge"]
+keywords = ["batch", "cluster", "slurm", "altair-grid-engine", "uge", "sge"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "pandas",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "pytest",
+    "pytest-cov",
+    "ruff",
 ]
 
 [project.urls]
@@ -36,3 +46,21 @@ version = {attr = "kfbatch.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["kfbatch*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["B", "C901", "E", "F", "I", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 22
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

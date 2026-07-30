@@ -1,0 +1,34 @@
+{
+  "queue_info": [
+    {
+      "running jobs": [
+        {
+          "JB_job_number": 1001,
+          "JAT_prio": 0.5,
+          "JB_name": "analysis_a",
+          "JB_owner": "user_a",
+          "state": "r",
+          "JAT_start_time": "2026-07-30T10:00:00",
+          "queue_name": "mjobs.q@compute01",
+          "slots": 4
+        }
+      ]
+    }
+  ],
+  "job_info": [
+    {
+      "pending jobs": [
+        {
+          "JB_job_number": 1002,
+          "JAT_prio": 0,
+          "JB_name": "analysis_b",
+          "JB_owner": "user_b",
+          "state": "Rq",
+          "JB_submission_time": "2026-07-30T10:01:00",
+          "queue_name": "",
+          "slots": 2
+        }
+      ]
+    }
+  ]
+}

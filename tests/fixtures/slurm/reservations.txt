@@ -1,0 +1,24 @@
+ReservationName=research_hold StartTime=2026-07-30T09:00:00
+   EndTime=2026-07-31T09:00:00 Duration=1-00:00:00
+   Nodes=compute01 NodeCnt=1 CoreCnt=8
+   Features=(null) PartitionName=epyc
+     NodeName=compute01 CoreIDs=8-15
+   TRES=cpu=8,mem=16G,node=1
+   Users=user_b Accounts=(null) Licenses=(null)
+   State=ACTIVE BurstBuffer=(null)
+
+ReservationName=training StartTime=2026-07-30T09:00:00
+   EndTime=2026-07-31T09:00:00 Duration=1-00:00:00
+   Nodes=compute03 NodeCnt=1 CoreCnt=16
+   Features=(null) PartitionName=short
+   TRES=cpu=16,mem=32G,node=1
+   Users=user_a Accounts=(null) Licenses=(null)
+   State=ACTIVE BurstBuffer=(null)
+
+ReservationName=expired StartTime=2026-07-28T09:00:00
+   EndTime=2026-07-29T09:00:00 Duration=1-00:00:00
+   Nodes=compute02 NodeCnt=1 CoreCnt=4
+   Features=(null) PartitionName=epyc
+   TRES=cpu=4,mem=4G,node=1
+   Users=user_c Accounts=(null) Licenses=(null)
+   State=INACTIVE BurstBuffer=(null)

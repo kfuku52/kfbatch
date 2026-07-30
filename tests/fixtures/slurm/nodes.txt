@@ -1,0 +1,4 @@
+NodeName=login01 Arch=x86_64 CPUAlloc=0 CPUEfctv=8 CPUTot=8 RealMemory=16384 AllocMem=0 FreeMem=12000 State=IDLE Partitions=login
+NodeName=compute01 Arch=x86_64 CPUAlloc=8 CPUEfctv=32 CPUTot=32 RealMemory=131072 AllocMem=32768 FreeMem=96000 State=MIXED Partitions=epyc
+NodeName=compute02 Arch=x86_64 CPUAlloc=0 CPUEfctv=32 CPUTot=32 RealMemory=65536 AllocMem=0 FreeMem=60000 State=IDLE Partitions=epyc
+NodeName=compute03 Arch=x86_64 CPUAlloc=0 CPUEfctv=16 CPUTot=16 RealMemory=32768 AllocMem=0 FreeMem=30000 State=IDLE+RESERVED Partitions=short ReservationName=training
