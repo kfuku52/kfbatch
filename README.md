@@ -1,3 +1,5 @@
+![kfbatch — Compact cluster resource summaries for SLURM and UGE/SGE](docs/assets/kfbatch-header.png)
+
 [![Tests](https://github.com/kfuku52/kfbatch/actions/workflows/tests.yml/badge.svg)](https://github.com/kfuku52/kfbatch/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://github.com/kfuku52/kfbatch/blob/master/.github/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/kfuku52/kfbatch/blob/master/LICENSE)
