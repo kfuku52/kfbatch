@@ -84,6 +84,7 @@ jobs:
           tar -tzf dist/*.tar.gz | grep '/docs/assets/kfbatch-header.png$'
           tar -tzf dist/*.tar.gz | grep '/tests/fixtures/age/qstat_f_1.txt$'
           tar -tzf dist/*.tar.gz | grep '/tests/fixtures/slurm/nodes.txt$'
+          tar -tzf dist/*.tar.gz | grep '/benchmarks/benchmark_parsers.py$'
           tar -tzf dist/*.tar.gz | grep '/kfbatch/kfbatch$'
           tar -tzf dist/*.tar.gz | grep '/CHANGELOG.md$'
       - name: Install built wheel and check CLI
