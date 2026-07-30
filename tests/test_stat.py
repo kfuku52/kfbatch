@@ -20,16 +20,18 @@ from kfbatch.stat import (
     get_scheduler_from_command,
     get_scontrol_node_df,
     get_scontrol_reservation_df,
+    get_slurm_fairshare_rank_summary,
     get_slurm_launch_heuristic_df,
     get_sprio_df,
     get_squeue_command_for_parsing,
     get_squeue_user_df,
+    get_sshare_df,
     get_uge_json_job_df,
     get_user_df,
     mark_unresolved_slurm_reservations,
     print_queued_job_summary,
     print_slurm_compact_summary,
-    print_slurm_launch_heuristic,
+    print_slurm_fairshare_rank_summary,
     print_uge_compact_summary,
 )
 
@@ -156,10 +158,11 @@ def test_get_squeue_user_df_marks_truncated_array_as_estimated():
 
 def test_get_squeue_user_df_parses_extended_slurm_fields():
     lines = [
-        "2002\tepyc\tanalysis_one\tcurrent_user\tPD\t0:00\t1\t1\t1G\t00:05:00\t(Priority)",
+        "2002\tepyc\tanalysis_one\tcurrent_user\taccount_a\tPD\t0:00\t1\t1\t1G\t00:05:00\t(Priority)",
     ]
     df = get_squeue_user_df(lines)
     assert df.shape[0] == 1
+    assert df.at[0, "account"] == "account_a"
     assert int(df.at[0, "req_cpus"]) == 1
     assert df.at[0, "req_mem"] == "1G"
     assert df.at[0, "time_limit"] == "00:05:00"
@@ -176,6 +179,16 @@ def test_get_squeue_user_df_marks_legacy_slurm_fields_as_incomplete():
     assert int(df.at[0, "req_cpus"]) == 0
     assert df.at[0, "req_mem"] == ""
     assert bool(df.at[0, "resource_fields_complete"]) is False
+
+
+def test_get_squeue_user_df_keeps_legacy_account_empty():
+    lines = [
+        "15243876\tepyc\twrap\tkfuku\tPD\t0:00\t1\t1\t1G\t00:05:00\t(Priority)",
+    ]
+    df = get_squeue_user_df(lines)
+    assert df.shape[0] == 1
+    assert df.at[0, "account"] == ""
+    assert df.at[0, "pending_reason"] == "Priority"
 
 
 def test_get_scontrol_node_df_skips_nodes_without_partition_and_marks_reserved():
@@ -199,6 +212,19 @@ def test_get_scontrol_node_df_marks_inactive_partition_as_abnormal():
     df = get_scontrol_node_df(lines, partition_state_map={"p1": "INACTIVE"})
     assert df.shape[0] == 1
     assert df.at[0, "status"] == "partition_state=INACTIVE"
+
+
+@pytest.mark.parametrize("partition_state_map", [None, {}])
+def test_get_scontrol_node_df_treats_unknown_partition_metadata_as_abnormal(
+    partition_state_map,
+):
+    lines = [
+        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 "
+        "RealMemory=32000 FreeMem=16000 State=IDLE Partitions=p1",
+    ]
+    df = get_scontrol_node_df(lines, partition_state_map=partition_state_map)
+    assert df.shape[0] == 1
+    assert df.at[0, "status"] == "partition_state=UNKNOWN"
 
 
 def test_get_scontrol_node_df_treats_lowercase_up_as_up():
@@ -293,6 +319,66 @@ def test_get_scontrol_reservation_df_parses_multiline_hostlists_and_access():
     assert df["accessible"].tolist() == [True, True]
 
 
+def test_get_scontrol_reservation_df_expands_compound_hostlists():
+    lines = [
+        "ReservationName=compound Nodes=rack[1-2]n[01-02] NodeCnt=4 CoreCnt=8 "
+        "PartitionName=p1 Users=other State=ACTIVE",
+    ]
+    df = get_scontrol_reservation_df(lines, current_user="current_user")
+    assert df["node_name"].tolist() == [
+        "rack1n01",
+        "rack1n02",
+        "rack2n01",
+        "rack2n02",
+    ]
+    assert df["reserved_cores"].tolist() == [2, 2, 2, 2]
+
+
+def test_reservation_access_requires_every_configured_dimension():
+    lines = [
+        "ReservationName=restricted Nodes=n1 NodeCnt=1 CoreCnt=4 "
+        "PartitionName=p1 Users=ALL Accounts=project_b State=ACTIVE",
+    ]
+    denied = get_scontrol_reservation_df(
+        lines,
+        current_user="current_user",
+        current_accounts={"project_a"},
+    )
+    allowed = get_scontrol_reservation_df(
+        lines,
+        current_user="current_user",
+        current_accounts={"project_b"},
+    )
+    assert denied.at[0, "accessible"] == False  # noqa: E712
+    assert allowed.at[0, "accessible"] == True  # noqa: E712
+
+
+def test_reservation_access_is_conservative_for_specific_qos_and_supports_deny_lists():
+    qos_lines = [
+        "ReservationName=qos Nodes=n1 NodeCnt=1 CoreCnt=4 "
+        "PartitionName=p1 Users=ALL QOS=urgent State=ACTIVE",
+    ]
+    denied_user_lines = [
+        "ReservationName=deny Nodes=n1 NodeCnt=1 CoreCnt=4 "
+        "PartitionName=p1 Users=-blocked State=ACTIVE",
+    ]
+    qos = get_scontrol_reservation_df(qos_lines, current_user="current_user")
+    blocked = get_scontrol_reservation_df(denied_user_lines, current_user="blocked")
+    allowed = get_scontrol_reservation_df(denied_user_lines, current_user="current_user")
+    assert qos.at[0, "accessible"] == False  # noqa: E712
+    assert blocked.at[0, "accessible"] == False  # noqa: E712
+    assert allowed.at[0, "accessible"] == True  # noqa: E712
+
+
+def test_get_scontrol_reservation_df_normalizes_null_partition():
+    lines = [
+        "ReservationName=global Nodes=n1 NodeCnt=1 CoreCnt=4 "
+        "PartitionName=(null) Users=other State=ACTIVE",
+    ]
+    df = get_scontrol_reservation_df(lines, current_user="current_user")
+    assert df.at[0, "queue_name"] == ""
+
+
 def test_apply_slurm_reservations_subtracts_partial_reservations_and_estimated_memory():
     df_node = pandas.DataFrame(
         {
@@ -350,6 +436,59 @@ def test_apply_slurm_reservations_uses_explicit_reserved_memory_when_available()
     assert out.at[0, "hc:mem_req"] == "18000M"
 
 
+def test_apply_slurm_reservations_subtracts_from_every_partition_alias():
+    df_node = pandas.DataFrame(
+        {
+            "queue_name": ["p1", "p2"],
+            "node_name": ["node20", "node20"],
+            "ncore_resv": [0, 0],
+            "ncore_available": [32, 32],
+            "ncore_total": [64, 64],
+            "hl:mem_total": ["64000M", "64000M"],
+            "hc:mem_req": ["32000M", "32000M"],
+            "status": ["", ""],
+        }
+    )
+    df_reservation = pandas.DataFrame(
+        {
+            "queue_name": ["p1"],
+            "node_name": ["node20"],
+            "reservation_name": ["r1"],
+            "reserved_cores": [8],
+            "reserved_mem_mb": [8000],
+            "accessible": [False],
+        }
+    )
+    out = apply_slurm_reservations(df_node, df_reservation)
+    assert out["ncore_available"].tolist() == [24, 24]
+    assert out["hc:mem_req"].tolist() == ["24000M", "24000M"]
+
+
+def test_apply_slurm_reservations_expands_all_nodes_within_partition():
+    df_node = pandas.DataFrame(
+        {
+            "queue_name": ["p1", "p1", "p2"],
+            "node_name": ["n1", "n2", "n3"],
+            "ncore_resv": [0, 0, 0],
+            "ncore_available": [8, 8, 8],
+            "ncore_total": [8, 8, 8],
+            "hl:mem_total": ["8000M", "8000M", "8000M"],
+            "hc:mem_req": ["8000M", "8000M", "8000M"],
+            "status": ["", "", ""],
+        }
+    )
+    df_reservation = get_scontrol_reservation_df(
+        [
+            "ReservationName=all_p1 Nodes=ALL NodeCnt=2 CoreCnt=0 "
+            "PartitionName=p1 Users=other State=ACTIVE",
+        ],
+        current_user="current_user",
+    )
+    out = apply_slurm_reservations(df_node, df_reservation)
+    assert out["ncore_available"].tolist() == [0, 0, 8]
+    assert out["hc:mem_req"].tolist() == ["0M", "0M", "8000M"]
+
+
 def test_get_sprio_df_parses_pending_priority_table():
     lines = [
         "          JOBID PARTITION   PRIORITY       SITE        AGE  FAIRSHARE    JOBSIZE  PARTITION",
@@ -360,6 +499,92 @@ def test_get_sprio_df_parses_pending_priority_table():
     assert df.at[0, "job_id"] == "2002"
     assert int(df.at[0, "priority"]) == 12721
     assert int(df.at[0, "fairshare"]) == 2708
+
+
+def test_get_sprio_df_parses_stable_pipe_format():
+    df = get_sprio_df(["2002|epyc|12721|0|0|2708|14|10000"])
+    assert df.shape[0] == 1
+    assert df.at[0, "partition"] == "epyc"
+    assert int(df.at[0, "priority"]) == 12721
+    assert int(df.at[0, "fairshare"]) == 2708
+
+
+def test_get_sshare_df_parses_pipe_output_and_skips_account_summary():
+    lines = [
+        "Account|User|RawShares|NormShares|RawUsage|EffectvUsage|FairShare",
+        "general_analysis||1|0.040000|1000000|0.800000|",
+        " general_analysis|kfuku|1|0.000429|41192861|0.015753|0.005691",
+    ]
+    df = get_sshare_df(lines)
+    assert df.shape[0] == 1
+    assert df.at[0, "account"] == "general_analysis"
+    assert df.at[0, "user"] == "kfuku"
+    assert float(df.at[0, "fairshare"]) == pytest.approx(0.005691)
+
+
+def test_get_slurm_fairshare_rank_summary_reports_overall_and_pending_ranks():
+    df_job = pandas.DataFrame(
+        {
+            "job_id": ["1", "2", "3"],
+            "user": ["alice", "kfuku", "zeta"],
+            "account": ["general_analysis", "general_analysis", "general_analysis"],
+            "state": ["PD", "PD", "R"],
+        }
+    )
+    df_share = get_sshare_df(
+        [
+            "Account|User|RawShares|NormShares|RawUsage|EffectvUsage|FairShare",
+            " general_analysis|alice|1|0.1|100|0.001|0.900000",
+            " general_analysis|bob|1|0.1|200|0.002|0.500000",
+            " general_analysis|kfuku|1|0.1|300|0.003|0.005691",
+            " general_analysis|zeta|1|0.1|400|0.004|0.001000",
+        ]
+    )
+    summary = get_slurm_fairshare_rank_summary(
+        df_job=df_job, df_share=df_share, current_user="kfuku"
+    )
+    assert summary["overall_rank"] == 3
+    assert summary["overall_total"] == 4
+    assert summary["pending_rank"] == 2
+    assert summary["pending_total"] == 2
+
+
+def test_print_slurm_fairshare_rank_summary_uses_compact_single_line(capsys):
+    print_slurm_fairshare_rank_summary(
+        {
+            "account": "general_analysis",
+            "fairshare": 0.005691,
+            "overall_rank": 41,
+            "overall_total": 52,
+            "pending_rank": 12,
+            "pending_total": 20,
+            "pending_missing": 0,
+        }
+    )
+    out = capsys.readouterr().out
+    assert "fairshare  self=0.005691" in out
+    assert "account=general_analysis" in out
+    assert "assoc_rank=41/52" in out
+    assert "pending_assoc_rank=12/20" in out
+
+
+def test_fairshare_summary_discloses_multi_account_selection(capsys):
+    df_share = get_sshare_df(
+        [
+            "Account|User|RawShares|NormShares|RawUsage|EffectvUsage|FairShare",
+            " account_a|current_user|1|0.1|10|0.1|0.400000",
+            " account_b|current_user|1|0.1|20|0.2|0.600000",
+        ]
+    )
+    summary = get_slurm_fairshare_rank_summary(
+        df_job=pandas.DataFrame(),
+        df_share=df_share,
+        current_user="current_user",
+    )
+    assert summary["account"] == "account_b"
+    assert summary["association_count"] == 2
+    print_slurm_fairshare_rank_summary(summary)
+    assert "selected=best_of_2_associations" in capsys.readouterr().out
 
 
 def test_get_slurm_launch_heuristic_keeps_resource_ceiling_when_priority_blocks_even_tiny_job():
@@ -665,6 +890,10 @@ def test_adjust_ram_unit_converts_memory_to_binary_gib_consistently():
     assert out.at[2, "hl:mem_total"] == 1024.0
 
 
+def test_memory_parser_supports_pebibyte_suffix():
+    assert memory_text_to_gib("1P") == 1024.0 * 1024.0
+
+
 def test_adjust_ram_unit_handles_lowercase_and_invalid_values():
     df = pandas.DataFrame(
         {
@@ -700,7 +929,7 @@ def test_print_queued_job_summary_slurm_accepts_long_state_names(capsys):
     )
     print_queued_job_summary(df_user, scheduler="slurm", current_user="current_user")
     out = capsys.readouterr().out
-    assert "jobs  self:R/Q/F=2/0/4  all:R/Q/F=2/3/4" in out
+    assert "jobs  self:R/Q/X=2/0/4  all:R/Q/X=2/3/4" in out
 
 
 def test_print_queued_job_summary_uge_matches_slurm_style(capsys):
@@ -748,35 +977,6 @@ def test_print_queued_job_summary_uge_marks_partial_job_source(capsys):
     )
     out = capsys.readouterr().out
     assert "jobs  observed:R/Q/F=4/0/0  (all-user status unavailable)" in out
-
-
-def test_print_slurm_launch_heuristic_uses_multiline_blocks(capsys):
-    df_launch = pandas.DataFrame(
-        {
-            "queue_name": ["epyc"],
-            "recommended_cores": [59],
-            "recommended_mem_gib": [925.0],
-            "top_node_name": ["node04"],
-            "top_node_cores": [59],
-            "top_node_mem_gib": [925.0],
-            "priority_gap": [3931],
-            "fairshare_gap": [3926],
-            "blocked_req_cores": [1],
-            "blocked_req_mem_gib": [1.0],
-            "blocked_time_limit": ["00:05:00"],
-            "status": ["priority_blocked"],
-        }
-    )
-    print_slurm_launch_heuristic(df_launch, current_user="current_user")
-    out = capsys.readouterr().out
-    assert "epyc:\n" in out
-    assert "  resource-only ceiling: <= 59 CPUs and 925GiB RAM\n" in out
-    assert "  top free node: node04 has 59 CPUs and 925GiB RAM\n" in out
-    assert "  smallest current Priority-blocked request is 1 CPUs / 1GiB / 00:05:00\n" in out
-    assert (
-        "  note: current user has Priority-blocked jobs; no stable immediate-start ceiling can be inferred\n"
-        in out
-    )
 
 
 def test_print_slurm_compact_summary_uses_single_row_per_partition(capsys):
@@ -856,7 +1056,7 @@ def test_print_uge_compact_summary_uses_qfree_queue_filter_and_quota(capsys):
     out = capsys.readouterr().out
     assert "queue" in out
     assert "mjobs.q" in out
-    assert "private.q" not in out
+    assert "private.q" in out
     assert "1/1/2" in out
     assert "12/4/32" in out
     assert "60/100" in out
@@ -919,8 +1119,28 @@ def test_merge_qstat_snapshot_marks_disappearing_nodes_unavailable():
     merged = stat_module._merge_qstat_iteration_min_availability(first, second)
     node02 = merged.loc[merged["node_name"] == "node02"].iloc[0]
     assert int(node02["ncore_available"]) == 0
-    assert node02["hc:mem_req"] == "0G"
+    assert pandas.isna(node02["hc:mem_req"])
     assert "missing_in_snapshot" in node02["status"]
+
+
+def test_merge_qstat_snapshots_preserves_any_abnormal_status_and_unknown_memory():
+    first = get_qstat_df(
+        [
+            "mjobs.q@node01 BP 0/0/2 0.10 lx-amd64 d",
+            "\thc:mem_req=2G",
+            "\thl:mem_total=8G",
+        ]
+    )
+    second = get_qstat_df(
+        [
+            "mjobs.q@node01 BP 0/0/2 0.10 lx-amd64",
+            "\thl:mem_total=8G",
+        ]
+    )
+    merged = stat_module._merge_qstat_iteration_min_availability(first, second)
+    assert "d" in merged.at[0, "status"]
+    assert pandas.isna(merged.at[0, "hc:mem_req"])
+    assert bool(merged.at[0, "hc:mem_req_known"]) is False
 
 
 def test_get_df_qstat_handles_empty_later_iteration(monkeypatch):

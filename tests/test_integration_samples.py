@@ -17,12 +17,14 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI_PATH = REPO_ROOT / "kfbatch" / "kfbatch"
 
 
-def _run_cli(args):
+def _run_cli(args, extra_env=None):
     env = os.environ.copy()
     pythonpath = str(REPO_ROOT)
     if env.get("PYTHONPATH"):
         pythonpath += os.pathsep + env["PYTHONPATH"]
     env["PYTHONPATH"] = pythonpath
+    if extra_env is not None:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(CLI_PATH)] + args,
         cwd=str(REPO_ROOT),
@@ -164,11 +166,35 @@ def test_slurm_cli_uses_compact_partition_table():
         ]
     )
     assert out.returncode == 0
-    assert "jobs  self:R/Q/F=" in out.stdout
+    assert "jobs  self:R/Q/X=" in out.stdout
     assert "part" in out.stdout
     assert "cpu(a/u/t)" in out.stdout
     assert "ram(a/t)GiB" in out.stdout
     assert "launch" in out.stdout
+
+
+def test_slurm_cli_reports_fairshare_ranks_from_fixture():
+    out = _run_cli(
+        [
+            "--example_file",
+            "tests/fixtures/slurm/squeue_fairshare.txt",
+            "--stat_command",
+            "squeue",
+            "--slurm_node_example_file",
+            "tests/fixtures/slurm/nodes.txt",
+            "--slurm_partition_example_file",
+            "tests/fixtures/slurm/partitions.txt",
+            "--slurm_reservation_example_file",
+            "tests/fixtures/slurm/reservations.txt",
+            "--slurm_share_example_file",
+            "tests/fixtures/slurm/sshare.txt",
+        ],
+        extra_env={"USER": "current_user", "LOGNAME": "current_user"},
+    )
+    assert out.returncode == 0
+    assert "fairshare  self=0.500000" in out.stdout
+    assert "assoc_rank=2/3" in out.stdout
+    assert "pending_assoc_rank=2/2" in out.stdout
 
 
 def test_qstat_cli_writes_valid_tsv(tmp_path):
@@ -223,3 +249,82 @@ def test_cli_writes_separate_node_and_job_schemas(tmp_path):
     assert {"job_id", "user", "total_slots"}.issubset(job_df.columns)
     assert "job_id" not in node_df.columns
     assert "node_name" not in job_df.columns
+
+
+def test_slurm_cli_keeps_compact_layout_when_launch_heuristic_is_disabled():
+    out = _run_cli(
+        [
+            "--example_file",
+            "tests/fixtures/slurm/squeue_full.txt",
+            "--slurm_node_example_file",
+            "tests/fixtures/slurm/nodes.txt",
+            "--slurm_partition_example_file",
+            "tests/fixtures/slurm/partitions.txt",
+            "--slurm_reservation_example_file",
+            "tests/fixtures/slurm/reservations.txt",
+            "--show_fairshare_rank",
+            "no",
+            "--show_launch_heuristic",
+            "no",
+        ]
+    )
+    assert out.returncode == 0
+    assert "part" in out.stdout
+    assert "cpu(a/u/t)" in out.stdout
+    assert "Reporting top" not in out.stdout
+
+
+def test_slurm_node_failure_writes_jobs_but_returns_nonzero(tmp_path):
+    jobs_path = tmp_path / "jobs.tsv"
+    out = _run_cli(
+        [
+            "--example_file",
+            "tests/fixtures/slurm/squeue_full.txt",
+            "--slurm_node_command",
+            "false",
+            "--slurm_partition_example_file",
+            "tests/fixtures/slurm/partitions.txt",
+            "--show_fairshare_rank",
+            "no",
+            "--out_jobs",
+            str(jobs_path),
+        ]
+    )
+    assert out.returncode == 1
+    assert jobs_path.exists()
+    assert "Slurm node/resource data is unavailable" in out.stderr
+
+
+def test_slurm_reservation_failure_suppresses_resource_ceiling():
+    out = _run_cli(
+        [
+            "--example_file",
+            "tests/fixtures/slurm/squeue_full.txt",
+            "--slurm_node_example_file",
+            "tests/fixtures/slurm/nodes.txt",
+            "--slurm_partition_example_file",
+            "tests/fixtures/slurm/partitions.txt",
+            "--slurm_reservation_command",
+            "false",
+            "--show_fairshare_rank",
+            "no",
+        ]
+    )
+    assert out.returncode == 0
+    assert "resource ceilings are suppressed" in out.stdout
+    assert "epyc   0/2/2" in out.stdout
+
+
+def test_cli_rejects_same_node_and_job_output_path_before_scheduler_access(tmp_path):
+    output_path = tmp_path / "same.tsv"
+    out = _run_cli(
+        [
+            "--out_nodes",
+            str(output_path),
+            "--out_jobs",
+            str(output_path),
+        ]
+    )
+    assert out.returncode == 1
+    assert "must refer to different files" in out.stderr
+    assert not output_path.exists()

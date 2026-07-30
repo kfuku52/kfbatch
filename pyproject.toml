@@ -23,12 +23,14 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "pandas",
+    "pandas>=1.5",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "bandit",
     "build",
+    "pip-audit",
     "pytest",
     "pytest-cov",
     "ruff",
@@ -37,6 +39,8 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/kfuku52/kfbatch"
 Repository = "https://github.com/kfuku52/kfbatch"
+Changelog = "https://github.com/kfuku52/kfbatch/blob/main/CHANGELOG.md"
+Issues = "https://github.com/kfuku52/kfbatch/issues"
 
 [project.scripts]
 kfbatch = "kfbatch.cli:main"
@@ -60,7 +64,11 @@ select = ["B", "C901", "E", "F", "I", "UP"]
 ignore = ["E501"]
 
 [tool.ruff.lint.mccabe]
-max-complexity = 22
+max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B105"]

@@ -12,6 +12,7 @@ _MIB_PER_UNIT = {
     "M": 1.0,
     "G": 1024.0,
     "T": 1024.0 * 1024.0,
+    "P": 1024.0 * 1024.0 * 1024.0,
 }
 
 
@@ -28,7 +29,7 @@ def memory_text_to_mib(value, default_unit="G"):
     if not text:
         return float("nan")
     match = re.fullmatch(
-        r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTkmgt])?([cngCNG])?",
+        r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPkmgtp])?([cngCNG])?",
         text,
     )
     if match is None:
@@ -60,7 +61,7 @@ def slurm_request_memory_gib(value, req_cpus=1, num_nodes=1):
         return float("nan")
     text = str(value).strip()
     match = re.fullmatch(
-        r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTkmgt])?([cngCNG])?",
+        r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPkmgtp])?([cngCNG])?",
         text,
     )
     if match is None:

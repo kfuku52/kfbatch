@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import locale
 import shlex
-import subprocess
+
+# Scheduler command strings are explicit program input and are parsed into argv.
+import subprocess  # nosec B404
 
 from kfbatch.errors import KFBatchCommandError
 
@@ -69,7 +71,8 @@ def get_command_stdout_lines(
     if timeout_seconds is not None and float(timeout_seconds) > 0:
         timeout = float(timeout_seconds)
     try:
-        command_out = subprocess.run(
+        # The parsed argv list is executed directly; shell=True is never used.
+        command_out = subprocess.run(  # nosec B603
             command,
             capture_output=True,
             timeout=timeout,

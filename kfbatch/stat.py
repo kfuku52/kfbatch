@@ -1,8 +1,11 @@
 import getpass
+import grp
 import json
 import os
+import pathlib
 import re
 import shlex
+import tempfile
 
 import pandas
 
@@ -66,7 +69,7 @@ SLURM_UNAVAILABLE_NODE_FLAGS = {
     "REBOOT_ISSUED",
     "PLANNED",
 }
-SLURM_SQUEUE_PARSE_FIELDS = "%i\t%P\t%j\t%u\t%t\t%M\t%D\t%C\t%m\t%l\t%R"
+SLURM_SQUEUE_PARSE_FIELDS = "%i\t%P\t%j\t%u\t%a\t%t\t%M\t%D\t%C\t%m\t%l\t%R"
 QSTAT_REQUIRED_NODE_FIELDS = {
     "queue_name",
     "node_name",
@@ -116,10 +119,6 @@ def _parse_uge_task_expression(task_expression):
     if num_tasks == 0:
         return 1, True
     return num_tasks, estimated
-
-
-def _count_uge_task_expression(task_expression):
-    return _parse_uge_task_expression(task_expression)[0]
 
 
 def get_qstat_df(lines):
@@ -206,16 +205,8 @@ def _memory_series_to_gb(series):
     return memory_series_to_gib(series)
 
 
-def _memory_series_to_gib(series):
-    return _memory_series_to_gb(series)
-
-
 def _memory_text_to_gb(value):
     return memory_text_to_gib(value)
-
-
-def _memory_text_to_gib(value):
-    return _memory_text_to_gb(value)
 
 
 def _memory_text_to_mb(value):
@@ -272,6 +263,66 @@ def _extract_slurm_pending_reason(node_or_reason):
     return m.group(1).strip()
 
 
+def _merge_qstat_common_rows(df_base, df_new, common_index):
+    if len(common_index) == 0:
+        return
+    base_cores = pandas.to_numeric(
+        df_base.loc[common_index, "ncore_available"], errors="coerce"
+    ).fillna(0)
+    new_cores = pandas.to_numeric(
+        df_new.loc[common_index, "ncore_available"], errors="coerce"
+    ).fillna(0)
+    use_new = new_cores <= base_cores
+    for col in ["ncore_resv", "ncore_used", "ncore_total", "np_load"]:
+        if col in df_base.columns and col in df_new.columns:
+            replacement = df_new.loc[common_index, col]
+            selected = df_base.loc[common_index, col].copy()
+            selected.loc[use_new] = replacement.loc[use_new]
+            df_base.loc[common_index, col] = selected
+    df_base.loc[common_index, "ncore_available"] = (
+        pandas.concat([base_cores, new_cores], axis=1).min(axis=1).astype(int)
+    )
+
+    for mem_col in ["hc:mem_req", "hl:mem_total"]:
+        base_mem = _memory_series_to_gb(df_base.loc[common_index, mem_col])
+        new_mem = _memory_series_to_gb(df_new.loc[common_index, mem_col])
+        known_col = mem_col + "_known"
+        base_known = (
+            df_base.loc[common_index, known_col].fillna(False).astype(bool)
+            if known_col in df_base.columns
+            else base_mem.notna()
+        )
+        new_known = (
+            df_new.loc[common_index, known_col].fillna(False).astype(bool)
+            if known_col in df_new.columns
+            else new_mem.notna()
+        )
+        known = base_known & new_known & base_mem.notna() & new_mem.notna()
+        min_mem = pandas.concat([base_mem, new_mem], axis=1).min(axis=1)
+        df_base.loc[common_index, mem_col] = min_mem.where(known).map(
+            lambda value: pandas.NA if pandas.isna(value) else f"{float(value):.3f}G"
+        )
+        known_values = df_base[known_col].copy()
+        known_values.loc[common_index] = known
+        df_base[known_col] = known_values
+
+    if "status" not in df_base.columns:
+        df_base["status"] = ""
+    new_status = (
+        df_new.loc[common_index, "status"]
+        if "status" in df_new.columns
+        else pandas.Series("", index=common_index)
+    )
+    for row_index in common_index:
+        tokens = []
+        for value in [df_base.at[row_index, "status"], new_status.at[row_index]]:
+            for token in str(value or "").split("|"):
+                token = token.strip()
+                if token and token not in tokens:
+                    tokens.append(token)
+        df_base.at[row_index, "status"] = "|".join(tokens)
+
+
 def _merge_qstat_iteration_min_availability(df, df_i):
     key_cols = ["queue_name", "node_name"]
     if df.shape[0] == 0:
@@ -283,28 +334,16 @@ def _merge_qstat_iteration_min_availability(df, df_i):
     df_base = df.set_index(key_cols, drop=False).copy()
     df_new = df_i.set_index(key_cols, drop=False)
     common_index = df_base.index.intersection(df_new.index)
-    if len(common_index) > 0:
-        base_cores = pandas.to_numeric(
-            df_base.loc[common_index, "ncore_available"], errors="coerce"
-        ).fillna(0)
-        new_cores = pandas.to_numeric(
-            df_new.loc[common_index, "ncore_available"], errors="coerce"
-        ).fillna(0)
-        min_cores = pandas.concat([base_cores, new_cores], axis=1).min(axis=1)
-        df_base.loc[common_index, "ncore_available"] = min_cores.astype(int)
-        base_mem = _memory_series_to_gb(df_base.loc[common_index, "hc:mem_req"])
-        new_mem = _memory_series_to_gb(df_new.loc[common_index, "hc:mem_req"])
-        min_mem = pandas.concat([base_mem, new_mem], axis=1).min(axis=1, skipna=True)
-        df_base.loc[common_index, "hc:mem_req"] = min_mem.map(
-            lambda value: pandas.NA if pandas.isna(value) else f"{float(value):.3f}G"
-        )
+    _merge_qstat_common_rows(df_base, df_new, common_index)
     missing_from_new = df_base.index.difference(df_new.index)
     new_since_first = df_new.index.difference(df_base.index)
     if "status" not in df_base.columns:
         df_base["status"] = ""
     if len(missing_from_new) > 0:
         df_base.loc[missing_from_new, "ncore_available"] = 0
-        df_base.loc[missing_from_new, "hc:mem_req"] = "0G"
+        df_base.loc[missing_from_new, "hc:mem_req"] = pandas.NA
+        if "hc:mem_req_known" in df_base.columns:
+            df_base.loc[missing_from_new, "hc:mem_req_known"] = False
         previous = df_base.loc[missing_from_new, "status"].fillna("").astype(str)
         df_base.loc[missing_from_new, "status"] = previous.map(
             lambda value: "|".join(token for token in [value, "missing_in_snapshot"] if token)
@@ -314,7 +353,9 @@ def _merge_qstat_iteration_min_availability(df, df_i):
         if "status" not in new_rows.columns:
             new_rows["status"] = ""
         new_rows["ncore_available"] = 0
-        new_rows["hc:mem_req"] = "0G"
+        new_rows["hc:mem_req"] = pandas.NA
+        if "hc:mem_req_known" in new_rows.columns:
+            new_rows["hc:mem_req_known"] = False
         new_rows["status"] = (
             new_rows["status"]
             .fillna("")
@@ -329,56 +370,6 @@ def _merge_qstat_iteration_min_availability(df, df_i):
     df_base = df_base.reset_index(drop=True)
     df_base = df_base.sort_values(by=key_cols).reset_index(drop=True)
     return df_base
-
-
-def print_stats(df):
-    for i in df.index:
-        queue_name = df.at[i, "queue_name"]
-        num_avail_cpu = df.at[i, "ncore_available"]
-        avail_ram = df.at[i, "hc:mem_req"]
-        ram_unit = df.at[i, "hc:mem_req_unit"]
-        node_name = df.at[i, "node_name"]
-        node_status = df.at[i, "status"]
-        txt = "{}: {:,} cores and {:,.0f}{} RAM in {}"
-        if node_status != "":
-            txt += " with the status {}"
-        print(txt.format(queue_name, num_avail_cpu, avail_ram, ram_unit, node_name, node_status))
-
-
-def print_resource_availability(df, args):
-    queue_names = df.loc[:, "queue_name"].unique()
-    queue_names = [q for q in queue_names if not q.startswith("login")]
-    resources = dict()
-    resources["RAM"] = "hc:mem_req"
-    resources["core"] = "ncore_available"
-    for resource_name in resources.keys():
-        col = resources[resource_name]
-        print(f"Reporting top {resource_name} availability:")
-        for queue_name in queue_names:
-            if args.exclude_abnormal_node:
-                df_queue = df.loc[(df["queue_name"] == queue_name) & (df["status"] == ""), :]
-            else:
-                df_queue = df.loc[(df["queue_name"] == queue_name), :]
-            if df_queue.shape[0] == 0:
-                continue
-            other_cols = [oc for oc in list(resources.values()) if oc != col]
-            sort_by = [
-                col,
-            ] + other_cols
-            df_queue = df_queue.sort_values(by=sort_by, ascending=False).reset_index(drop=True)
-            if args.all_tiers:
-                descending_values = df_queue[col]
-                threshold_value = descending_values.iloc[
-                    min(args.ntop - 1, descending_values.shape[0] - 1)
-                ]
-                df_top_availability = df_queue.loc[(df_queue[col] >= threshold_value), :]
-                df_top_availability = df_top_availability.sort_values(
-                    by=col, ascending=False
-                ).reset_index(drop=True)
-            else:
-                df_top_availability = df_queue.iloc[0 : args.ntop, :]
-            print_stats(df=df_top_availability)
-        print("")
 
 
 def _empty_uge_job_df():
@@ -444,18 +435,7 @@ def get_user_df(lines):
     return pandas.DataFrame(rows, columns=_empty_uge_job_df().columns)
 
 
-def get_uge_json_job_df(lines):
-    payload = "\n".join([str(line).rstrip("\n") for line in lines]).strip()
-    if payload == "":
-        return _empty_uge_job_df()
-    try:
-        data = json.loads(payload)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    rows = []
-    if not isinstance(data, dict):
-        return None
-    recognized_schema = bool({"queue_info", "job_info"} & set(data))
+def _iter_uge_json_jobs(data):
     for section_value in data.values():
         if isinstance(section_value, dict):
             section_items = [section_value]
@@ -470,43 +450,58 @@ def get_uge_json_job_df(lines):
                 if not isinstance(job_list, list):
                     continue
                 for job in job_list:
-                    if not isinstance(job, dict):
-                        continue
-                    job_id = str(job.get("JB_job_number", job.get("job_id", ""))).strip()
-                    if job_id == "":
-                        continue
-                    recognized_schema = True
-                    slots = max(_safe_int(job.get("slots", 1), default=1), 0)
-                    task_expression = str(
-                        job.get("ja_task_id", job.get("ja-task-ID", job.get("tasks", "")))
-                    ).strip()
-                    num_tasks, expression_estimated = _parse_uge_task_expression(task_expression)
-                    queue_name = re.sub(r"@.*$", "", str(job.get("queue_name", "")).strip())
-                    state = str(job.get("state", ""))
-                    timestamp = str(
-                        job.get("JAT_start_time", job.get("JB_submission_time", ""))
-                    ).strip()
-                    timestamp_items = timestamp.split("T", 1)
-                    submit_or_start_date = timestamp_items[0] if timestamp_items else ""
-                    submit_or_start_time = timestamp_items[1] if len(timestamp_items) > 1 else ""
-                    rows.append(
-                        {
-                            "job_id": job_id,
-                            "prior": job.get("JAT_prio", ""),
-                            "name": str(job.get("JB_name", "")),
-                            "user": str(job.get("JB_owner", "")),
-                            "state": state,
-                            "submit_or_start_date": submit_or_start_date,
-                            "submit_or_start_time": submit_or_start_time,
-                            "queue_name": queue_name,
-                            "slots": slots,
-                            "ja_task_id": task_expression,
-                            "total_slots": slots * num_tasks,
-                            # AGE 2023 can omit the range for collapsed pending arrays.
-                            "task_count_estimated": expression_estimated
-                            or (not task_expression and not queue_name and "q" in state.lower()),
-                        }
-                    )
+                    if isinstance(job, dict):
+                        yield job
+
+
+def _uge_json_job_row(job):
+    job_id = str(job.get("JB_job_number", job.get("job_id", ""))).strip()
+    if job_id == "":
+        return None
+    slots = max(_safe_int(job.get("slots", 1), default=1), 0)
+    task_expression = str(
+        job.get("ja_task_id", job.get("ja-task-ID", job.get("tasks", "")))
+    ).strip()
+    num_tasks, expression_estimated = _parse_uge_task_expression(task_expression)
+    queue_name = re.sub(r"@.*$", "", str(job.get("queue_name", "")).strip())
+    state = str(job.get("state", ""))
+    timestamp = str(job.get("JAT_start_time", job.get("JB_submission_time", ""))).strip()
+    timestamp_items = timestamp.split("T", 1)
+    return {
+        "job_id": job_id,
+        "prior": job.get("JAT_prio", ""),
+        "name": str(job.get("JB_name", "")),
+        "user": str(job.get("JB_owner", "")),
+        "state": state,
+        "submit_or_start_date": timestamp_items[0] if timestamp_items else "",
+        "submit_or_start_time": timestamp_items[1] if len(timestamp_items) > 1 else "",
+        "queue_name": queue_name,
+        "slots": slots,
+        "ja_task_id": task_expression,
+        "total_slots": slots * num_tasks,
+        # AGE 2023 can omit the range for collapsed pending arrays.
+        "task_count_estimated": expression_estimated
+        or (not task_expression and not queue_name and "q" in state.lower()),
+    }
+
+
+def get_uge_json_job_df(lines):
+    payload = "\n".join([str(line).rstrip("\n") for line in lines]).strip()
+    if payload == "":
+        return _empty_uge_job_df()
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    recognized_schema = bool({"queue_info", "job_info"} & set(data))
+    rows = []
+    for job in _iter_uge_json_jobs(data):
+        row = _uge_json_job_row(job)
+        if row is not None:
+            recognized_schema = True
+            rows.append(row)
     if not recognized_schema:
         return None
     if len(rows) == 0:
@@ -652,11 +647,32 @@ def _split_squeue_row(line):
     if "\\t" in line:
         # Some captured files may contain literal "\t" separators.
         return line.split("\\t"), "\\t"
-    return re.split(r"\s+", line.strip(), maxsplit=10), " "
+    return re.split(r"\s+", line.strip(), maxsplit=11), " "
+
+
+def _looks_like_slurm_state_token(value):
+    return re.fullmatch(r"[A-Za-z_]+", str(value or "").strip()) is not None
 
 
 def _parse_squeue_row_items(items, rest_separator):
     items = [str(item).strip() for item in items]
+    has_account = len(items) >= 12 and _looks_like_slurm_state_token(items[5])
+    if has_account:
+        return {
+            "resource_fields_complete": True,
+            "job_id": items[0],
+            "partition": items[1],
+            "name": items[2],
+            "user": items[3],
+            "account": items[4],
+            "state": items[5],
+            "elapsed_time": items[6],
+            "num_nodes_txt": items[7],
+            "req_cpus_txt": items[8],
+            "req_mem": items[9],
+            "time_limit": items[10],
+            "node_or_reason": rest_separator.join(items[11:]).strip(),
+        }
     if len(items) >= 11:
         return {
             "resource_fields_complete": True,
@@ -664,6 +680,7 @@ def _parse_squeue_row_items(items, rest_separator):
             "partition": items[1],
             "name": items[2],
             "user": items[3],
+            "account": "",
             "state": items[4],
             "elapsed_time": items[5],
             "num_nodes_txt": items[6],
@@ -679,6 +696,7 @@ def _parse_squeue_row_items(items, rest_separator):
             "partition": items[1],
             "name": items[2],
             "user": items[3],
+            "account": "",
             "state": items[4],
             "elapsed_time": items[5],
             "num_nodes_txt": items[6],
@@ -696,6 +714,7 @@ def get_squeue_user_df(lines):
         "partition",
         "name",
         "user",
+        "account",
         "state",
         "elapsed_time",
         "num_nodes",
@@ -732,6 +751,7 @@ def get_squeue_user_df(lines):
                 "partition": row["partition"],
                 "name": row["name"],
                 "user": row["user"],
+                "account": row["account"],
                 "state": row["state"],
                 "elapsed_time": row["elapsed_time"],
                 "num_nodes": num_nodes,
@@ -796,10 +816,10 @@ def _safe_int(value, default=0):
 def _partition_state_is_up(partition_state):
     state = str(partition_state).strip().upper()
     if state == "":
-        return True
+        return False
     tokens = re.findall(r"[A-Z_]+", state)
     if len(tokens) == 0:
-        return True
+        return False
     return (tokens[0] == "UP") and (len(tokens) == 1)
 
 
@@ -914,268 +934,415 @@ def _split_slurm_hostlist(value):
 
 
 def _expand_slurm_hostlist(value):
-    hosts = []
-    for token in _split_slurm_hostlist(value):
-        match = re.fullmatch(r"([^\[]*)\[([^\]]+)\](.*)", token)
+    def expand_token(token):
+        match = re.search(r"\[([^\]]+)\]", token)
         if match is None:
-            hosts.append(token)
-            continue
-        prefix, expression, suffix = match.groups()
+            return [token]
+        prefix = token[: match.start()]
+        expression = match.group(1)
+        suffix = token[match.end() :]
+        expanded = []
         for item in expression.split(","):
             item = item.strip()
             range_match = re.fullmatch(r"([0-9]+)-([0-9]+)", item)
             if range_match is None:
-                hosts.append(f"{prefix}{item}{suffix}")
-                continue
-            start_text, end_text = range_match.groups()
-            start = int(start_text)
-            end = int(end_text)
-            if end < start:
-                continue
-            width = max(len(start_text), len(end_text))
-            hosts.extend(
-                "{}{:0{width}d}{}".format(prefix, number, suffix, width=width)
-                for number in range(start, end + 1)
-            )
+                values = [item] if item else []
+            else:
+                start_text, end_text = range_match.groups()
+                start = int(start_text)
+                end = int(end_text)
+                width = max(len(start_text), len(end_text))
+                values = [f"{number:0{width}d}" for number in range(start, end + 1)]
+            for expanded_value in values:
+                expanded.extend(expand_token(f"{prefix}{expanded_value}{suffix}"))
+        return expanded
+
+    text = str(value).strip()
+    if text.upper() == "ALL":
+        return ["*"]
+    hosts = []
+    for token in _split_slurm_hostlist(text):
+        hosts.extend(expand_token(token))
     return hosts
 
 
+def _normalize_access_values(value):
+    return [
+        item.strip()
+        for item in str(value or "").split(",")
+        if item.strip() not in {"", "(null)", "N/A"}
+    ]
+
+
+def _access_list_allows(value, candidates):
+    entries = _normalize_access_values(value)
+    if not entries:
+        return None
+    candidates = {str(candidate).strip() for candidate in candidates if str(candidate).strip()}
+    if "ALL" in entries:
+        return True
+    is_deny_list = all(entry.startswith("-") for entry in entries)
+    if is_deny_list:
+        denied = {entry[1:] for entry in entries}
+        return bool(candidates) and bool(candidates - denied)
+    if any(entry.startswith("-") for entry in entries):
+        return False
+    return bool(candidates.intersection(entries))
+
+
 def _reservation_user_is_authorized(users_value, current_user):
+    allowed = _access_list_allows(users_value, [current_user])
+    return bool(allowed)
+
+
+def _current_group_names():
+    group_ids = set(os.getgroups())
+    group_ids.add(os.getgid())
+    names = set()
+    for group_id in group_ids:
+        try:
+            names.add(grp.getgrgid(group_id).gr_name)
+        except KeyError:
+            continue
+    return names
+
+
+def _reservation_access_is_authorized(
+    header_params,
+    current_user,
+    current_accounts=None,
+    current_groups=None,
+):
     if not current_user:
         return False
-    users = {
-        item.strip()
-        for item in str(users_value).split(",")
-        if item.strip() not in {"", "(null)", "N/A"}
-    }
-    return "ALL" in users or current_user in users
-
-
-def get_scontrol_reservation_df(lines, current_user=""):
-    columns = [
-        "queue_name",
-        "node_name",
-        "reservation_name",
-        "reserved_cores",
-        "reserved_mem_mb",
-        "whole_node",
-        "accessible",
-        "access_users",
+    current_accounts = set(current_accounts or [])
+    current_groups = set(current_groups or _current_group_names())
+    partition_name = str(header_params.get("PartitionName", "")).strip()
+    if partition_name in {"(null)", "N/A"}:
+        partition_name = ""
+    checks = [
+        _access_list_allows(header_params.get("Users", ""), [current_user]),
+        _access_list_allows(header_params.get("Groups", ""), current_groups),
+        _access_list_allows(header_params.get("Accounts", ""), current_accounts),
+        # A QOS-specific reservation cannot be proven accessible without a
+        # concrete job QOS. QOS=ALL is still positively resolvable.
+        _access_list_allows(header_params.get("QOS", ""), []),
+        _access_list_allows(
+            header_params.get("AllowedPartitions", ""),
+            [partition_name] if partition_name else [],
+        ),
     ]
+    configured_checks = [check for check in checks if check is not None]
+    return bool(configured_checks) and all(configured_checks)
+
+
+SLURM_RESERVATION_COLUMNS = [
+    "queue_name",
+    "node_name",
+    "reservation_name",
+    "reserved_cores",
+    "reserved_mem_mb",
+    "whole_node",
+    "accessible",
+    "access_users",
+]
+
+
+def _reservation_header_params(block):
+    params = {}
+    for line in block:
+        if ("=" in line) and (not line.startswith("NodeName=")):
+            params.update(_parse_key_value_fields(line))
+    return params
+
+
+def _reservation_resource_defaults(header_params):
+    node_count = _safe_int(header_params.get("NodeCnt", ""), default=0)
+    reserved_cores = max(_safe_int(header_params.get("CoreCnt", ""), default=0), 0)
+    tres = header_params.get("TRES", "") or header_params.get("ReqTRES", "")
+    if reserved_cores <= 0:
+        reserved_cores = max(
+            _safe_int(_extract_tres_resource_value(tres, "cpu"), default=0),
+            0,
+        )
+    reserved_mem_mb = max(
+        _memory_text_to_mb(_extract_tres_resource_value(tres, "mem")),
+        0,
+    )
+    return node_count, reserved_cores, reserved_mem_mb
+
+
+def _reservation_row(context, node_name, reserved_cores, reserved_mem_mb, whole_node):
+    return {
+        "queue_name": context["partition_name"],
+        "node_name": node_name,
+        "reservation_name": context["reservation_name"],
+        "reserved_cores": reserved_cores,
+        "reserved_mem_mb": reserved_mem_mb,
+        "whole_node": whole_node,
+        "accessible": context["accessible"],
+        "access_users": context["access_users"],
+    }
+
+
+def _explicit_reservation_rows(block, context):
+    rows = []
+    explicit_lines = [line for line in block if line.startswith("NodeName=")]
+    for line in explicit_lines:
+        params = _parse_key_value_fields(line)
+        node_name = params.get("NodeName", "").strip()
+        if node_name == "":
+            continue
+        reserved_cores = _count_core_id_expression(params.get("CoreIDs", ""))
+        if reserved_cores == 0 and context["node_count"] == 1:
+            reserved_cores = context["default_reserved_cores"]
+        if reserved_cores <= 0:
+            continue
+        reserved_mem_mb = 0
+        if context["default_reserved_mem_mb"] > 0 and context["node_count"] > 0:
+            reserved_mem_mb = int(round(context["default_reserved_mem_mb"] / context["node_count"]))
+        rows.append(
+            _reservation_row(
+                context,
+                node_name,
+                reserved_cores,
+                reserved_mem_mb,
+                whole_node=False,
+            )
+        )
+    return rows, bool(explicit_lines)
+
+
+def _hostlist_reservation_rows(header_params, context):
+    node_names = _expand_slurm_hostlist(header_params.get("Nodes", "").strip())
+    if not node_names:
+        return []
+    node_count = context["node_count"] or len(node_names)
+    rows = []
+    for node_index, node_name in enumerate(node_names):
+        reserved_cores = 0
+        if context["default_reserved_cores"] > 0 and node_count > 0:
+            reserved_cores = context["default_reserved_cores"] // node_count
+            if node_index < context["default_reserved_cores"] % node_count:
+                reserved_cores += 1
+        reserved_mem_mb = 0
+        if context["default_reserved_mem_mb"] > 0 and node_count > 0:
+            reserved_mem_mb = int(round(context["default_reserved_mem_mb"] / node_count))
+        rows.append(
+            _reservation_row(
+                context,
+                node_name,
+                reserved_cores,
+                reserved_mem_mb,
+                whole_node=context["default_reserved_cores"] <= 0,
+            )
+        )
+    return rows
+
+
+def _parse_reservation_block(block, current_user, current_accounts, current_groups):
+    header_params = _reservation_header_params(block)
+    reservation_name = header_params.get("ReservationName", "").strip()
+    state = header_params.get("State", "").strip().upper()
+    if state == "":
+        warning = "reservation {} has no State field and was ignored".format(
+            reservation_name or "<unknown>"
+        )
+        return [], warning
+    if state != "ACTIVE":
+        return [], None
+    partition_name = header_params.get("PartitionName", "").strip()
+    if partition_name in {"(null)", "N/A"}:
+        partition_name = ""
+    node_count, reserved_cores, reserved_mem_mb = _reservation_resource_defaults(header_params)
+    context = {
+        "partition_name": partition_name,
+        "reservation_name": reservation_name,
+        "node_count": node_count,
+        "default_reserved_cores": reserved_cores,
+        "default_reserved_mem_mb": reserved_mem_mb,
+        "accessible": _reservation_access_is_authorized(
+            header_params,
+            current_user=current_user,
+            current_accounts=current_accounts,
+            current_groups=current_groups,
+        ),
+        "access_users": header_params.get("Users", "").strip(),
+    }
+    rows, has_explicit_rows = _explicit_reservation_rows(block, context)
+    if has_explicit_rows:
+        return rows, None
+    rows = _hostlist_reservation_rows(header_params, context)
+    if rows:
+        return rows, None
+    warning = "active reservation {} has no parseable Nodes field".format(
+        reservation_name or "<unknown>"
+    )
+    return [], warning
+
+
+def get_scontrol_reservation_df(
+    lines,
+    current_user="",
+    current_accounts=None,
+    current_groups=None,
+):
     rows = []
     warnings = []
     for block in _split_scontrol_named_blocks(lines, "ReservationName="):
-        header_params = {}
-        for line in block:
-            if ("=" in line) and (not line.startswith("NodeName=")):
-                header_params.update(_parse_key_value_fields(line))
-        state = header_params.get("State", "").strip().upper()
-        reservation_name = header_params.get("ReservationName", "").strip()
-        if state == "":
-            warnings.append(
-                "reservation {} has no State field and was ignored".format(
-                    reservation_name or "<unknown>"
-                )
-            )
-            continue
-        if state != "ACTIVE":
-            continue
-        partition_name = header_params.get("PartitionName", "").strip()
-        if partition_name == "":
-            warnings.append(
-                "active reservation {} has no PartitionName and was ignored".format(
-                    reservation_name or "<unknown>"
-                )
-            )
-            continue
-        node_count = _safe_int(header_params.get("NodeCnt", ""), default=0)
-        default_reserved_cores = max(_safe_int(header_params.get("CoreCnt", ""), default=0), 0)
-        reservation_tres = header_params.get("TRES", "")
-        if reservation_tres == "":
-            reservation_tres = header_params.get("ReqTRES", "")
-        if default_reserved_cores <= 0:
-            default_reserved_cores = max(
-                _safe_int(
-                    _extract_tres_resource_value(reservation_tres, "cpu"),
-                    default=0,
-                ),
-                0,
-            )
-        default_reserved_mem_mb = max(
-            _memory_text_to_mb(_extract_tres_resource_value(reservation_tres, "mem")), 0
+        block_rows, warning = _parse_reservation_block(
+            block,
+            current_user,
+            current_accounts,
+            current_groups,
         )
-        access_users = header_params.get("Users", "").strip()
-        accessible = _reservation_user_is_authorized(access_users, current_user)
-        has_explicit_node_rows = False
-        for line in block:
-            if not line.startswith("NodeName="):
-                continue
-            has_explicit_node_rows = True
-            params = _parse_key_value_fields(line)
-            node_name = params.get("NodeName", "").strip()
-            if node_name == "":
-                continue
-            reserved_cores = _count_core_id_expression(params.get("CoreIDs", ""))
-            if (reserved_cores == 0) and (node_count == 1):
-                reserved_cores = default_reserved_cores
-            if reserved_cores <= 0:
-                continue
-            reserved_mem_mb = 0
-            if (default_reserved_mem_mb > 0) and (node_count > 0):
-                reserved_mem_mb = int(round(float(default_reserved_mem_mb) / float(node_count)))
-            rows.append(
-                {
-                    "queue_name": partition_name,
-                    "node_name": node_name,
-                    "reservation_name": reservation_name,
-                    "reserved_cores": reserved_cores,
-                    "reserved_mem_mb": reserved_mem_mb,
-                    "whole_node": False,
-                    "accessible": accessible,
-                    "access_users": access_users,
-                }
-            )
-        if has_explicit_node_rows:
-            continue
-        node_names = _expand_slurm_hostlist(header_params.get("Nodes", "").strip())
-        if not node_names:
-            warnings.append(
-                "active reservation {} has no parseable Nodes field".format(
-                    reservation_name or "<unknown>"
-                )
-            )
-            continue
-        if node_count <= 0:
-            node_count = len(node_names)
-        for node_index, node_name in enumerate(node_names):
-            reserved_cores = 0
-            if default_reserved_cores > 0 and node_count > 0:
-                reserved_cores = default_reserved_cores // node_count
-                if node_index < (default_reserved_cores % node_count):
-                    reserved_cores += 1
-            reserved_mem_mb = 0
-            if default_reserved_mem_mb > 0 and node_count > 0:
-                reserved_mem_mb = int(round(float(default_reserved_mem_mb) / float(node_count)))
-            rows.append(
-                {
-                    "queue_name": partition_name,
-                    "node_name": node_name,
-                    "reservation_name": reservation_name,
-                    "reserved_cores": reserved_cores,
-                    "reserved_mem_mb": reserved_mem_mb,
-                    "whole_node": default_reserved_cores <= 0,
-                    "accessible": accessible,
-                    "access_users": access_users,
-                }
-            )
-    frame = pandas.DataFrame(rows, columns=columns)
+        rows.extend(block_rows)
+        if warning is not None:
+            warnings.append(warning)
+    frame = pandas.DataFrame(rows, columns=SLURM_RESERVATION_COLUMNS)
     frame.attrs["warnings"] = warnings
     return frame
 
 
+def _expand_reservation_rows(df_node, df_reservation):
+    available_nodes = set(df_node["node_name"].dropna().astype(str))
+    rows = []
+    unresolved_targets = []
+    for _, reservation in df_reservation.iterrows():
+        node_name = str(reservation.get("node_name", "") or "").strip()
+        queue_name = str(reservation.get("queue_name", "") or "").strip()
+        if node_name == "*":
+            if queue_name:
+                targets = (
+                    df_node.loc[df_node["queue_name"].astype(str) == queue_name, "node_name"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+            else:
+                targets = sorted(available_nodes)
+        else:
+            targets = [node_name] if node_name in available_nodes else []
+        if not targets:
+            unresolved_targets.append(
+                f"{reservation.get('reservation_name', '<unknown>')}:{node_name or '<none>'}"
+            )
+            continue
+        for target in targets:
+            row = reservation.to_dict()
+            row["node_name"] = target
+            rows.append(row)
+    expanded = pandas.DataFrame(rows, columns=df_reservation.columns)
+    expanded.attrs["unresolved_targets"] = unresolved_targets
+    return expanded
+
+
 def apply_slurm_reservations(df_node, df_reservation):
     if (
-        (df_node is None)
-        or (df_node.shape[0] == 0)
-        or (df_reservation is None)
-        or (df_reservation.shape[0] == 0)
+        df_node is None
+        or df_node.shape[0] == 0
+        or df_reservation is None
+        or df_reservation.shape[0] == 0
     ):
         return df_node
     df = df_node.copy()
-    if "reservation_cores" not in df.columns:
-        df["reservation_cores"] = 0
-    if "reservation_mem_mb" not in df.columns:
-        df["reservation_mem_mb"] = 0
-    reservation_rows = df_reservation.copy()
-    if "accessible" in reservation_rows.columns:
-        reservation_rows = reservation_rows.loc[
-            ~reservation_rows["accessible"].fillna(False).astype(bool), :
-        ].copy()
+    for col in ["reservation_cores", "reservation_mem_mb"]:
+        if col not in df.columns:
+            df[col] = 0
+    if "reservation_accessible" not in df.columns:
+        df["reservation_accessible"] = False
+
+    reservation_rows = _expand_reservation_rows(df, df_reservation)
+    df.attrs["reservation_unresolved_targets"] = reservation_rows.attrs.get(
+        "unresolved_targets", []
+    )
     if reservation_rows.shape[0] == 0:
         return df
-    if "reserved_mem_mb" not in reservation_rows.columns:
-        reservation_rows["reserved_mem_mb"] = 0
-    reservation_rows["reserved_mem_mb"] = (
-        pandas.to_numeric(reservation_rows["reserved_mem_mb"], errors="coerce")
-        .fillna(0)
-        .astype(int)
+
+    accessible_mask = (
+        reservation_rows["accessible"].fillna(False).astype(bool)
+        if "accessible" in reservation_rows.columns
+        else pandas.Series(False, index=reservation_rows.index)
     )
-    node_shape = df.loc[:, ["queue_name", "node_name", "ncore_total", "hl:mem_total"]].copy()
+    accessible_rows = reservation_rows.loc[accessible_mask, :]
+    accessible_nodes = set(accessible_rows["node_name"].dropna().astype(str))
+    if accessible_nodes:
+        df.loc[df["node_name"].astype(str).isin(accessible_nodes), "reservation_accessible"] = True
+
+    reservation_rows = reservation_rows.loc[~accessible_mask, :].copy()
+    if reservation_rows.shape[0] == 0:
+        return df
+
+    node_shape = (
+        df.loc[:, ["node_name", "ncore_total", "hl:mem_total"]]
+        .drop_duplicates(subset=["node_name"])
+        .copy()
+    )
     node_shape["node_total_mem_mb"] = node_shape["hl:mem_total"].map(_memory_text_to_mb)
     node_shape["ncore_total"] = (
         pandas.to_numeric(node_shape["ncore_total"], errors="coerce").fillna(0).astype(int)
     )
-    reservation_rows = reservation_rows.merge(
-        node_shape, how="left", on=["queue_name", "node_name"]
-    )
+    reservation_rows = reservation_rows.merge(node_shape, how="left", on="node_name")
     reservation_rows["reserved_cores_effective"] = (
         pandas.to_numeric(reservation_rows["reserved_cores"], errors="coerce").fillna(0).astype(int)
     )
-    if "whole_node" in reservation_rows.columns:
-        whole_node = reservation_rows["whole_node"].fillna(False).astype(bool)
-        reservation_rows.loc[whole_node, "reserved_cores_effective"] = (
-            reservation_rows.loc[whole_node, "ncore_total"].fillna(0).astype(int)
+    whole_node = (
+        reservation_rows.get(
+            "whole_node",
+            pandas.Series(False, index=reservation_rows.index),
         )
-    reservation_rows["reserved_mem_mb_effective"] = reservation_rows["reserved_mem_mb"]
-    if "whole_node" in reservation_rows.columns:
-        reservation_rows.loc[whole_node, "reserved_mem_mb_effective"] = (
-            reservation_rows.loc[whole_node, "node_total_mem_mb"].fillna(0).astype(int)
-        )
+        .fillna(False)
+        .astype(bool)
+    )
+    reservation_rows.loc[whole_node, "reserved_cores_effective"] = (
+        reservation_rows.loc[whole_node, "ncore_total"].fillna(0).astype(int)
+    )
+    reserved_mem_mb = reservation_rows.get(
+        "reserved_mem_mb",
+        pandas.Series(0, index=reservation_rows.index),
+    )
+    reservation_rows["reserved_mem_mb_effective"] = (
+        pandas.to_numeric(reserved_mem_mb, errors="coerce").fillna(0).astype(int)
+    )
+    reservation_rows.loc[whole_node, "reserved_mem_mb_effective"] = (
+        reservation_rows.loc[whole_node, "node_total_mem_mb"].fillna(0).astype(int)
+    )
     needs_estimate = (
         (reservation_rows["reserved_mem_mb_effective"] <= 0)
         & (reservation_rows["reserved_cores_effective"] > 0)
         & (reservation_rows["ncore_total"] > 0)
     )
-    if needs_estimate.sum():
-        reservation_rows.loc[needs_estimate, "reserved_mem_mb_effective"] = (
-            (
-                (
-                    reservation_rows.loc[needs_estimate, "node_total_mem_mb"]
-                    * reservation_rows.loc[needs_estimate, "reserved_cores_effective"]
-                )
-                / reservation_rows.loc[needs_estimate, "ncore_total"]
-            )
-            .round()
-            .astype(int)
+    reservation_rows.loc[needs_estimate, "reserved_mem_mb_effective"] = (
+        (
+            reservation_rows.loc[needs_estimate, "node_total_mem_mb"]
+            * reservation_rows.loc[needs_estimate, "reserved_cores_effective"]
+            / reservation_rows.loc[needs_estimate, "ncore_total"]
         )
+        .round()
+        .astype(int)
+    )
     grouped = (
-        reservation_rows.groupby(["queue_name", "node_name"], as_index=False)[
+        reservation_rows.groupby("node_name", as_index=False)[
             ["reserved_cores_effective", "reserved_mem_mb_effective"]
         ]
         .sum()
         .rename(
             columns={
-                "reserved_cores_effective": "reservation_cores",
-                "reserved_mem_mb_effective": "reservation_mem_mb",
+                "reserved_cores_effective": "reservation_cores_new",
+                "reserved_mem_mb_effective": "reservation_mem_mb_new",
             }
         )
     )
-    df = df.merge(grouped, how="left", on=["queue_name", "node_name"], suffixes=("", "_new"))
-    if "reservation_cores_new" in df.columns:
-        new_values = (
-            pandas.to_numeric(df["reservation_cores_new"], errors="coerce").fillna(0).astype(int)
-        )
-        df["reservation_cores"] = (
-            pandas.to_numeric(df["reservation_cores"], errors="coerce").fillna(0).astype(int)
-            + new_values
-        )
-        df = df.drop(columns=["reservation_cores_new"])
-    if "reservation_mem_mb_new" in df.columns:
-        new_values = (
-            pandas.to_numeric(df["reservation_mem_mb_new"], errors="coerce").fillna(0).astype(int)
-        )
-        df["reservation_mem_mb"] = (
-            pandas.to_numeric(df["reservation_mem_mb"], errors="coerce").fillna(0).astype(int)
-            + new_values
-        )
-        df = df.drop(columns=["reservation_mem_mb_new"])
-    df["reservation_cores"] = (
-        pandas.to_numeric(df["reservation_cores"], errors="coerce").fillna(0).astype(int)
-    )
-    df["reservation_mem_mb"] = (
-        pandas.to_numeric(df["reservation_mem_mb"], errors="coerce").fillna(0).astype(int)
-    )
-    node_available_mem_mb = df["hc:mem_req"].map(memory_text_to_mib)
+    df = df.merge(grouped, how="left", on="node_name")
+    for col in ["reservation_cores_new", "reservation_mem_mb_new"]:
+        df[col] = pandas.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    df["reservation_cores"] = pandas.to_numeric(df["reservation_cores"], errors="coerce").fillna(
+        0
+    ).astype(int) + df.pop("reservation_cores_new")
+    df["reservation_mem_mb"] = pandas.to_numeric(df["reservation_mem_mb"], errors="coerce").fillna(
+        0
+    ).astype(int) + df.pop("reservation_mem_mb_new")
     df["ncore_resv"] = (
         pandas.to_numeric(df["ncore_resv"], errors="coerce").fillna(0).astype(int)
         + df["reservation_cores"]
@@ -1188,13 +1355,14 @@ def apply_slurm_reservations(df_node, df_reservation):
         .clip(lower=0)
         .astype(int)
     )
-    adjusted_available_mem_mb = (node_available_mem_mb - df["reservation_mem_mb"]).clip(lower=0)
-    df["hc:mem_req"] = adjusted_available_mem_mb.map(
+    available_mem_mb = df["hc:mem_req"].map(memory_text_to_mib)
+    adjusted_mem_mb = (available_mem_mb - df["reservation_mem_mb"]).clip(lower=0)
+    df["hc:mem_req"] = adjusted_mem_mb.map(
         lambda value: pandas.NA if pandas.isna(value) else f"{int(value)}M"
     )
     if "hc:mem_req_known" in df.columns:
         df["hc:mem_req_known"] = (
-            df["hc:mem_req_known"].fillna(False).astype(bool) & adjusted_available_mem_mb.notna()
+            df["hc:mem_req_known"].fillna(False).astype(bool) & adjusted_mem_mb.notna()
         )
     fully_reserved = (df["reservation_cores"] > 0) & (df["ncore_available"] <= 0)
     if fully_reserved.any():
@@ -1218,20 +1386,17 @@ def mark_unresolved_slurm_reservations(df_node, df_reservation=None):
     ].fillna("").astype(str).str.contains("RESERVED", regex=False)
     if not has_reservation_flag.any():
         return df
-    known_pairs = set()
-    if df_reservation is not None and df_reservation.shape[0] > 0:
-        known_pairs = set(
-            zip(
-                df_reservation["queue_name"].astype(str),
-                df_reservation["node_name"].astype(str),
-                strict=False,
-            )
-        )
-    unresolved = pandas.Series(False, index=df.index)
-    for row_index in df.index[has_reservation_flag]:
-        pair = (str(df.at[row_index, "queue_name"]), str(df.at[row_index, "node_name"]))
-        if pair not in known_pairs:
-            unresolved.at[row_index] = True
+    accounted = (
+        pandas.to_numeric(df["reservation_cores"], errors="coerce").fillna(0) > 0
+        if "reservation_cores" in df.columns
+        else pandas.Series(False, index=df.index)
+    )
+    accessible = (
+        df["reservation_accessible"].fillna(False).astype(bool)
+        if "reservation_accessible" in df.columns
+        else pandas.Series(False, index=df.index)
+    )
+    unresolved = has_reservation_flag & ~accounted & ~accessible
     if unresolved.any():
         df.loc[unresolved, "status"] = (
             df.loc[unresolved, "status"]
@@ -1245,6 +1410,23 @@ def mark_unresolved_slurm_reservations(df_node, df_reservation=None):
         )
         df.loc[unresolved, "ncore_available"] = 0
         df.loc[unresolved, "hc:mem_req"] = "0M"
+    return df
+
+
+def mark_slurm_metadata_unknown(df_node, reason):
+    if df_node is None or df_node.shape[0] == 0:
+        return df_node
+    df = df_node.copy()
+    df["status"] = (
+        df["status"]
+        .fillna("")
+        .astype(str)
+        .map(lambda value: "|".join(token for token in [value, reason] if token))
+    )
+    df["ncore_available"] = 0
+    df["hc:mem_req"] = pandas.NA
+    if "hc:mem_req_known" in df.columns:
+        df["hc:mem_req_known"] = False
     return df
 
 
@@ -1264,10 +1446,12 @@ def get_sprio_df(lines):
         line = raw_line.strip()
         if line == "":
             continue
-        if line.startswith("JOBID ") or line.startswith("JOBID\t"):
+        if line.upper().startswith("JOBID"):
             continue
-        items = re.split(r"\s+", line)
-        if len(items) < 8:
+        items = [item.strip() for item in line.split("|")]
+        if len(items) != 8:
+            items = re.split(r"\s+", line)
+        if len(items) != 8:
             continue
         rows.append(
             {
@@ -1282,6 +1466,50 @@ def get_sprio_df(lines):
             }
         )
     return pandas.DataFrame(rows, columns=columns)
+
+
+def get_sshare_df(lines):
+    columns = [
+        "account",
+        "user",
+        "raw_shares",
+        "norm_shares",
+        "raw_usage",
+        "effective_usage",
+        "fairshare",
+    ]
+    rows = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line == "":
+            continue
+        if line.lower().startswith("account|"):
+            continue
+        items = line.split("|")
+        if len(items) < 7:
+            continue
+        account = items[0].strip()
+        user = items[1].strip()
+        if user == "":
+            continue
+        rows.append(
+            {
+                "account": account,
+                "user": user,
+                "raw_shares": _safe_int(items[2], default=0),
+                "norm_shares": pandas.to_numeric(items[3], errors="coerce"),
+                "raw_usage": pandas.to_numeric(items[4], errors="coerce"),
+                "effective_usage": pandas.to_numeric(items[5], errors="coerce"),
+                "fairshare": pandas.to_numeric(items[6], errors="coerce"),
+            }
+        )
+    df = pandas.DataFrame(rows, columns=columns)
+    if df.shape[0] == 0:
+        return df
+    for col in ["norm_shares", "raw_usage", "effective_usage", "fairshare"]:
+        df[col] = pandas.to_numeric(df[col], errors="coerce")
+    df = df.loc[df["fairshare"].notna(), :].copy()
+    return df.reset_index(drop=True)
 
 
 def get_scontrol_node_df(lines, partition_state_map=None):
@@ -1350,11 +1578,14 @@ def get_scontrol_node_df(lines, partition_state_map=None):
         )
         arch = params.get("Arch", "")
         for partition in partitions:
+            partition_state = (
+                ""
+                if partition_state_map is None
+                else str(partition_state_map.get(partition, "")).strip()
+            )
             partition_status = ""
-            if partition_state_map is not None:
-                partition_state = partition_state_map.get(partition, "")
-                if not _partition_state_is_up(partition_state):
-                    partition_status = f"partition_state={partition_state}"
+            if not _partition_state_is_up(partition_state):
+                partition_status = f"partition_state={partition_state or 'UNKNOWN'}"
             status = node_status
             if (status != "") and (partition_status != ""):
                 status = f"{status}|{partition_status}"
@@ -1432,12 +1663,13 @@ def print_queued_job_summary(df_user, scheduler="uge", current_user="", all_user
             num_qwaiting_self = int(df_user.loc[is_qwaiting & is_self, "total_slots"].sum())
             num_error_self = int(df_user.loc[is_error & is_self, "total_slots"].sum())
             print(
-                f"jobs  self:R/Q/F={num_running_self}/{num_qwaiting_self}/{num_error_self}  all:R/Q/F={num_running}/{num_qwaiting}/{num_error}"
+                f"jobs  self:R/Q/X={num_running_self}/{num_qwaiting_self}/{num_error_self}  "
+                f"all:R/Q/X={num_running}/{num_qwaiting}/{num_error}"
             )
         else:
             print(f"# of running job tasks (estimated from squeue): {num_running}")
             print(f"# of queued job tasks (estimated from squeue): {num_qwaiting}")
-            print(f"# of failed/cancelled job tasks (estimated from squeue): {num_error}")
+            print(f"# of terminal/error job tasks currently visible in squeue: {num_error}")
         num_estimated_rows = int(df_user["task_count_estimated"].sum())
         if num_estimated_rows > 0:
             txt = "note: {} row(s) had truncated/irregular SLURM array IDs; task counts are estimated."
@@ -1498,9 +1730,191 @@ def get_current_user_name():
         user_name = getpass.getuser().strip()
         if user_name:
             return user_name
-    except Exception:
-        pass
+    except (KeyError, OSError):
+        user_name = ""
     return os.environ.get("USER", "").strip()
+
+
+def _rank_fairshare_rows(df_share):
+    if (df_share is None) or (df_share.shape[0] == 0):
+        return pandas.DataFrame(
+            columns=[
+                "account",
+                "user",
+                "fairshare",
+                "raw_usage",
+                "effective_usage",
+                "fairshare_rank",
+            ]
+        )
+    df = df_share.copy()
+    df = df.loc[df["fairshare"].notna(), :].copy()
+    df = df.drop_duplicates(subset=["user", "account"], keep="first")
+    df = df.sort_values(
+        by=["fairshare", "user", "account"], ascending=[False, True, True]
+    ).reset_index(drop=True)
+    df["fairshare_rank"] = range(1, df.shape[0] + 1)
+    return df
+
+
+def _resolve_fairshare_account(df_share, user, account=""):
+    account = str(account or "").strip()
+    user = str(user or "").strip()
+    if account != "":
+        return account
+    if (df_share is None) or (df_share.shape[0] == 0) or user == "":
+        return ""
+    matches = (
+        df_share.loc[df_share["user"] == user, "account"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+        .tolist()
+    )
+    matches = [value for value in matches if value != ""]
+    if len(matches) == 1:
+        return matches[0]
+    return ""
+
+
+def _current_user_fairshare_account(df_job, df_share, current_user):
+    if current_user == "":
+        return ""
+    accounts = []
+    if (df_job is not None) and (df_job.shape[0] > 0) and ("user" in df_job.columns):
+        df_current = df_job.loc[df_job["user"].fillna("") == current_user, :].copy()
+        if df_current.shape[0] > 0:
+            account_series = (
+                df_current["account"]
+                if "account" in df_current.columns
+                else pandas.Series([""] * df_current.shape[0])
+            )
+            account_values = account_series.fillna("").astype(str).str.strip()
+            nonempty = sorted([value for value in account_values.unique().tolist() if value != ""])
+            if len(nonempty) == 1:
+                accounts = nonempty
+    if len(accounts) == 1:
+        return accounts[0]
+    return _resolve_fairshare_account(df_share, current_user)
+
+
+def get_slurm_fairshare_rank_summary(df_job, df_share, current_user=""):
+    if current_user == "" or (df_share is None) or (df_share.shape[0] == 0):
+        return None
+    df_ranked = _rank_fairshare_rows(df_share)
+    if df_ranked.shape[0] == 0:
+        return None
+    current_account = _current_user_fairshare_account(df_job, df_share, current_user)
+    if current_account != "":
+        current_rows = df_ranked.loc[
+            (df_ranked["user"] == current_user) & (df_ranked["account"] == current_account), :
+        ].copy()
+    else:
+        current_rows = df_ranked.loc[df_ranked["user"] == current_user, :].copy()
+    if current_rows.shape[0] == 0:
+        return None
+    association_count = int(current_rows.shape[0])
+    current_row = current_rows.sort_values(by=["fairshare_rank"]).iloc[0]
+    current_account = str(current_row["account"])
+
+    pending_rank = None
+    pending_total = 0
+    pending_missing = 0
+    if (df_job is not None) and (df_job.shape[0] > 0) and ("user" in df_job.columns):
+        state_codes = df_job["state"].fillna("").map(_normalize_slurm_job_state)
+        df_pending = df_job.loc[state_codes.isin(SLURM_PENDING_STATES), :].copy()
+        pairs = []
+        seen = set()
+        for _, row in df_pending.iterrows():
+            user = str(row.get("user", "") or "").strip()
+            account = str(row.get("account", "") or "").strip()
+            if user == "":
+                continue
+            account = _resolve_fairshare_account(df_share, user, account)
+            key = (user, account)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append(key)
+        pending_rows = []
+        for user, account in pairs:
+            if account != "":
+                matched = df_ranked.loc[
+                    (df_ranked["user"] == user) & (df_ranked["account"] == account), :
+                ].copy()
+            else:
+                matched = df_ranked.loc[df_ranked["user"] == user, :].copy()
+            if matched.shape[0] == 0:
+                pending_missing += 1
+                continue
+            pending_rows.append(matched.sort_values(by=["fairshare_rank"]).iloc[0].to_dict())
+        if len(pending_rows) > 0:
+            df_pending_ranked = pandas.DataFrame(pending_rows)
+            df_pending_ranked = df_pending_ranked.sort_values(
+                by=["fairshare", "user", "account"],
+                ascending=[False, True, True],
+            ).reset_index(drop=True)
+            df_pending_ranked["pending_fairshare_rank"] = range(1, df_pending_ranked.shape[0] + 1)
+            pending_total = int(df_pending_ranked.shape[0])
+            current_pending = df_pending_ranked.loc[
+                (df_pending_ranked["user"] == current_user)
+                & (df_pending_ranked["account"] == current_account),
+                :,
+            ]
+            if current_pending.shape[0] == 0:
+                current_pending = df_pending_ranked.loc[
+                    df_pending_ranked["user"] == current_user, :
+                ]
+            if current_pending.shape[0] > 0:
+                pending_rank = int(
+                    current_pending.sort_values(by=["pending_fairshare_rank"]).iloc[0][
+                        "pending_fairshare_rank"
+                    ]
+                )
+
+    return {
+        "user": current_user,
+        "account": current_account,
+        "association_count": association_count,
+        "fairshare": float(current_row["fairshare"]),
+        "overall_rank": int(current_row["fairshare_rank"]),
+        "overall_total": int(df_ranked.shape[0]),
+        "pending_rank": pending_rank,
+        "pending_total": pending_total,
+        "pending_missing": pending_missing,
+        "raw_usage": current_row.get("raw_usage", None),
+        "effective_usage": current_row.get("effective_usage", None),
+    }
+
+
+def print_slurm_fairshare_rank_summary(summary):
+    if summary is None:
+        return
+    fields = [
+        "fairshare",
+        "self={:.6f}".format(float(summary["fairshare"])),
+    ]
+    account = str(summary.get("account", "") or "").strip()
+    if account != "":
+        fields.append(f"account={account}")
+    association_count = int(summary.get("association_count", 1) or 1)
+    if association_count > 1:
+        fields.append(f"selected=best_of_{association_count}_associations")
+    fields.append(
+        "assoc_rank={}/{}".format(int(summary["overall_rank"]), int(summary["overall_total"]))
+    )
+    pending_rank = summary.get("pending_rank", None)
+    pending_total = int(summary.get("pending_total", 0) or 0)
+    if pending_rank is not None and pending_total > 0:
+        fields.append(f"pending_assoc_rank={int(pending_rank)}/{pending_total}")
+    elif pending_total > 0:
+        fields.append(f"pending_assoc_rank=n/a/{pending_total}")
+    pending_missing = int(summary.get("pending_missing", 0) or 0)
+    if pending_missing > 0:
+        fields.append(f"pending_missing_fairshare={pending_missing}")
+    print("  ".join(fields))
+    print("")
 
 
 def _split_slurm_partition_field(partition_field):
@@ -1685,77 +2099,6 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=""
     return pandas.DataFrame(rows, columns=columns)
 
 
-def _get_launch_value(df_launch, row_index, preferred_col, legacy_col=None):
-    if preferred_col in df_launch.columns:
-        return df_launch.at[row_index, preferred_col]
-    if (legacy_col is not None) and (legacy_col in df_launch.columns):
-        return df_launch.at[row_index, legacy_col]
-    return None
-
-
-def print_slurm_launch_heuristic(df_launch, current_user=""):
-    if (df_launch is None) or (df_launch.shape[0] == 0):
-        return
-    subject = "current user"
-    if current_user != "":
-        subject = current_user
-    print(
-        f"Reporting heuristic single-node launch ceilings for {subject} (reservation-adjusted, priority-aware):"
-    )
-    for i in df_launch.index:
-        queue_name = df_launch.at[i, "queue_name"]
-        recommended_cores = df_launch.at[i, "recommended_cores"]
-        recommended_mem_gb = _get_launch_value(
-            df_launch, i, "recommended_mem_gb", "recommended_mem_gib"
-        )
-        top_node_name = df_launch.at[i, "top_node_name"]
-        top_node_cores = int(df_launch.at[i, "top_node_cores"])
-        top_node_mem_gb = float(
-            _get_launch_value(df_launch, i, "top_node_mem_gb", "top_node_mem_gib")
-        )
-        status = str(df_launch.at[i, "status"])
-        print(f"{queue_name}:")
-        if pandas.isna(recommended_cores):
-            print("  immediate-start ceiling: n/a")
-        elif status in ["priority_blocked", "priority_blocked_missing_fields"]:
-            print(
-                f"  resource-only ceiling: <= {int(recommended_cores):,} CPUs and {floor_gib(recommended_mem_gb)}GiB RAM"
-            )
-        else:
-            print(
-                f"  immediate-start ceiling: <= {int(recommended_cores):,} CPUs and {floor_gib(recommended_mem_gb)}GiB RAM"
-            )
-        if top_node_name != "":
-            print(
-                f"  top free node: {top_node_name} has {top_node_cores:,} CPUs and {floor_gib(top_node_mem_gb)}GiB RAM"
-            )
-        blocked_req_cores = df_launch.at[i, "blocked_req_cores"]
-        if pandas.notna(blocked_req_cores):
-            blocked_req_mem_gb = float(
-                _get_launch_value(df_launch, i, "blocked_req_mem_gb", "blocked_req_mem_gib")
-            )
-            blocked_time_limit = str(df_launch.at[i, "blocked_time_limit"]).strip()
-            blocked_txt = f"smallest current Priority-blocked request is {int(blocked_req_cores)} CPUs / {floor_gib(blocked_req_mem_gb)}GiB"
-            if blocked_time_limit not in ["", "nan"]:
-                blocked_txt += f" / {blocked_time_limit}"
-            print(f"  {blocked_txt}")
-        priority_gap = df_launch.at[i, "priority_gap"]
-        if pandas.notna(priority_gap):
-            print(f"  priority gap: {int(priority_gap)}")
-        fairshare_gap = df_launch.at[i, "fairshare_gap"]
-        if pandas.notna(fairshare_gap):
-            print(f"  fairshare gap: {int(fairshare_gap)}")
-        if status == "priority_blocked":
-            print(
-                "  note: current user has Priority-blocked jobs; no stable immediate-start ceiling can be inferred"
-            )
-        if status == "priority_blocked_missing_fields":
-            print(
-                "  note: current user has Priority-blocked jobs, but request size is unavailable in the current squeue format"
-            )
-    print("")
-
-
 def _format_slurm_compact_time_limit(time_limit):
     txt = str(time_limit).strip()
     if txt in ["", "nan", "N/A", "NOT_SET"]:
@@ -1786,6 +2129,30 @@ def _format_slurm_compact_node(node_name, ncore_available, mem_gb):
     return f"{node_name} {int(ncore_available)}c/{mem_text}"
 
 
+def _format_compact_top_nodes(df_nodes, primary_col, secondary_col, args):
+    if df_nodes.shape[0] == 0:
+        return "-"
+    ordered = df_nodes.sort_values(
+        by=[primary_col, secondary_col, "node_name"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+    ntop = max(int(getattr(args, "ntop", 1)), 1)
+    limit = min(ntop, ordered.shape[0])
+    if getattr(args, "all_tiers", False):
+        threshold = ordered.at[limit - 1, primary_col]
+        selected = ordered.loc[ordered[primary_col] >= threshold, :]
+    else:
+        selected = ordered.iloc[:limit, :]
+    return ", ".join(
+        _format_slurm_compact_node(
+            row["node_name"],
+            row["ncore_available"],
+            row["hc:mem_req"],
+        )
+        for _, row in selected.iterrows()
+    )
+
+
 def _format_slurm_compact_launch_row(row):
     if row is None:
         return "-"
@@ -1802,7 +2169,7 @@ def _format_slurm_compact_launch_row(row):
     else:
         memory_floor = floor_gib(recommended_mem_gb)
         memory_text = "?GiB" if memory_floor is None else f"{memory_floor}GiB"
-        resource_fields = [f"<={int(recommended_cores)}c/{memory_text}"]
+        resource_fields = [f"res<={int(recommended_cores)}c/{memory_text}"]
     if status in ["priority_blocked", "priority_blocked_missing_fields"]:
         fields = resource_fields + ["PRIO"]
         if pandas.notna(blocked_req_cores):
@@ -1847,21 +2214,17 @@ def print_slurm_compact_summary(df, df_launch, args):
         else:
             df_normal = df_queue.copy()
         if df_normal.shape[0] > 0:
-            df_top_cpu = df_normal.sort_values(
-                by=["ncore_available", "hc:mem_req", "node_name"], ascending=[False, False, True]
-            ).reset_index(drop=True)
-            df_top_ram = df_normal.sort_values(
-                by=["hc:mem_req", "ncore_available", "node_name"], ascending=[False, False, True]
-            ).reset_index(drop=True)
-            top_cpu = _format_slurm_compact_node(
-                df_top_cpu.at[0, "node_name"],
-                df_top_cpu.at[0, "ncore_available"],
-                df_top_cpu.at[0, "hc:mem_req"],
+            top_cpu = _format_compact_top_nodes(
+                df_normal,
+                "ncore_available",
+                "hc:mem_req",
+                args,
             )
-            top_ram = _format_slurm_compact_node(
-                df_top_ram.at[0, "node_name"],
-                df_top_ram.at[0, "ncore_available"],
-                df_top_ram.at[0, "hc:mem_req"],
+            top_ram = _format_compact_top_nodes(
+                df_normal,
+                "hc:mem_req",
+                "ncore_available",
+                args,
             )
             if top_cpu == top_ram:
                 top_ram = "same"
@@ -1909,7 +2272,10 @@ def print_slurm_compact_summary(df, df_launch, args):
             )
         )
     print("")
-    print("legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/total")
+    print(
+        "legend: nodes=working/abnormal/total, cpu=available/used/total, "
+        "ram=available/total, launch=res=CPU/RAM-only ceiling"
+    )
     print("")
 
 
@@ -1924,12 +2290,12 @@ def _format_qfree_int(value, zero_as_inf=False):
 
 def print_uge_compact_summary(df, df_qfree, args):
     qfree_rows = {}
+    queue_names = df["queue_name"].dropna().astype(str).unique().tolist()
     if (df_qfree is not None) and (df_qfree.shape[0] > 0):
-        queue_names = df_qfree["queue_name"].dropna().astype(str).tolist()
+        qfree_queue_names = df_qfree["queue_name"].dropna().astype(str).tolist()
+        queue_names.extend(queue for queue in qfree_queue_names if queue not in queue_names)
         for i in df_qfree.index:
             qfree_rows[str(df_qfree.at[i, "queue_name"])] = df_qfree.loc[i, :].to_dict()
-    else:
-        queue_names = df["queue_name"].dropna().astype(str).unique().tolist()
     rows = []
     for queue_name in queue_names:
         df_queue = df.loc[(df["queue_name"] == queue_name), :].reset_index(drop=True)
@@ -1948,23 +2314,17 @@ def print_uge_compact_summary(df, df_qfree, args):
             else:
                 df_normal = df_queue.copy()
             if df_normal.shape[0] > 0:
-                df_top_cpu = df_normal.sort_values(
-                    by=["ncore_available", "hc:mem_req", "node_name"],
-                    ascending=[False, False, True],
-                ).reset_index(drop=True)
-                df_top_ram = df_normal.sort_values(
-                    by=["hc:mem_req", "ncore_available", "node_name"],
-                    ascending=[False, False, True],
-                ).reset_index(drop=True)
-                top_cpu = _format_slurm_compact_node(
-                    df_top_cpu.at[0, "node_name"],
-                    df_top_cpu.at[0, "ncore_available"],
-                    df_top_cpu.at[0, "hc:mem_req"],
+                top_cpu = _format_compact_top_nodes(
+                    df_normal,
+                    "ncore_available",
+                    "hc:mem_req",
+                    args,
                 )
-                top_ram = _format_slurm_compact_node(
-                    df_top_ram.at[0, "node_name"],
-                    df_top_ram.at[0, "ncore_available"],
-                    df_top_ram.at[0, "hc:mem_req"],
+                top_ram = _format_compact_top_nodes(
+                    df_normal,
+                    "hc:mem_req",
+                    "ncore_available",
+                    args,
                 )
                 if top_cpu == top_ram:
                     top_ram = "same"
@@ -2120,73 +2480,128 @@ def _print_degraded(component, detail):
     print(f"note: degraded {component} data: {detail}")
 
 
-def get_df(args):
-    scheduler = get_scheduler_from_command(args.stat_command)
-    if scheduler is None:
-        raise KFBatchUsageError(f"Exiting. --stat_command does not support: {args.stat_command}")
-    timeout_seconds = _command_timeout_from_args(args)
-    if scheduler == "slurm":
-        current_user = get_current_user_name()
-        squeue_command = get_squeue_command_for_parsing(args.stat_command)
-        lines = get_command_stdout_lines(
-            command_str=squeue_command,
-            example_file=args.example_file,
-            allow_failure=False,
-            command_name="--stat_command",
-            timeout_seconds=timeout_seconds,
+def _print_slurm_fairshare(args, df_user, current_user, timeout_seconds):
+    if not getattr(args, "show_fairshare_rank", True):
+        return
+    share_lines = get_command_stdout_lines(
+        command_str=getattr(args, "slurm_share_command", "sshare -a -P"),
+        example_file=getattr(args, "slurm_share_example_file", ""),
+        allow_failure=True,
+        command_name="--slurm_share_command",
+        quiet_failure=True,
+        timeout_seconds=timeout_seconds,
+    )
+    if share_lines is None:
+        _print_degraded("Slurm FairShare", "--slurm_share_command failed or timed out")
+        return
+    df_share = get_sshare_df(share_lines)
+    summary = get_slurm_fairshare_rank_summary(
+        df_job=df_user,
+        df_share=df_share,
+        current_user=current_user,
+    )
+    if summary is not None:
+        print_slurm_fairshare_rank_summary(summary)
+    elif df_share.shape[0] == 0:
+        _print_degraded(
+            "Slurm FairShare",
+            "command succeeded but no association rows were parsed",
         )
-        df_user = get_squeue_user_df(lines)
-        print_queued_job_summary(df_user, scheduler="slurm", current_user=current_user)
-        partition_lines = get_command_stdout_lines(
-            command_str=args.slurm_partition_command,
-            example_file=args.slurm_partition_example_file,
-            allow_failure=True,
-            command_name="--slurm_partition_command",
-            quiet_failure=True,
-            timeout_seconds=timeout_seconds,
+
+
+def _get_slurm_partition_state_map(args, timeout_seconds):
+    partition_lines = get_command_stdout_lines(
+        command_str=args.slurm_partition_command,
+        example_file=args.slurm_partition_example_file,
+        allow_failure=True,
+        command_name="--slurm_partition_command",
+        quiet_failure=True,
+        timeout_seconds=timeout_seconds,
+    )
+    if partition_lines is None:
+        _print_degraded("Slurm partition", "--slurm_partition_command failed or timed out")
+        return None
+    df_partition = get_scontrol_partition_df(partition_lines)
+    if df_partition.shape[0] == 0:
+        _print_degraded(
+            "Slurm partition",
+            "command succeeded but no partition rows were parsed",
         )
-        partition_state_map = None
-        if partition_lines is not None:
-            df_partition = get_scontrol_partition_df(partition_lines)
-            if df_partition.shape[0] > 0:
-                partition_state_map = df_partition.set_index("partition_name")[
-                    "partition_state"
-                ].to_dict()
-            else:
-                _print_degraded(
-                    "Slurm partition",
-                    "command succeeded but no partition rows were parsed",
-                )
-        else:
-            _print_degraded(
-                "Slurm partition",
-                "--slurm_partition_command failed or timed out",
-            )
-        node_lines = get_command_stdout_lines(
-            command_str=args.slurm_node_command,
-            example_file=args.slurm_node_example_file,
-            allow_failure=True,
-            command_name="--slurm_node_command",
-            timeout_seconds=timeout_seconds,
+        return None
+    return df_partition.set_index("partition_name")["partition_state"].to_dict()
+
+
+def _get_slurm_df(args, timeout_seconds):
+    current_user = get_current_user_name()
+    lines = get_command_stdout_lines(
+        command_str=get_squeue_command_for_parsing(args.stat_command),
+        example_file=args.example_file,
+        allow_failure=False,
+        command_name="--stat_command",
+        timeout_seconds=timeout_seconds,
+    )
+    df_user = get_squeue_user_df(lines)
+    print_queued_job_summary(df_user, scheduler="slurm", current_user=current_user)
+    _print_slurm_fairshare(args, df_user, current_user, timeout_seconds)
+    partition_state_map = _get_slurm_partition_state_map(args, timeout_seconds)
+    node_lines = get_command_stdout_lines(
+        command_str=args.slurm_node_command,
+        example_file=args.slurm_node_example_file,
+        allow_failure=True,
+        command_name="--slurm_node_command",
+        timeout_seconds=timeout_seconds,
+    )
+    if node_lines is None:
+        print("Skipping node resource summary because --slurm_node_command failed.\n")
+        return None, df_user
+    df_node = get_scontrol_node_df(node_lines, partition_state_map=partition_state_map)
+    if df_node.shape[0] == 0:
+        print("Skipping node resource summary because SLURM node output could not be parsed.")
+        print(
+            'Use --slurm_node_command "scontrol show node -o" or provide --slurm_node_example_file.\n'
         )
-        if node_lines is None:
-            print("Skipping node resource summary because --slurm_node_command failed.")
-            print("")
-            return scheduler, None, df_user
-        df_slurm_node = get_scontrol_node_df(node_lines, partition_state_map=partition_state_map)
-        if df_slurm_node.shape[0] == 0:
-            print("Skipping node resource summary because SLURM node output could not be parsed.")
-            print(
-                'Use --slurm_node_command "scontrol show node -o" or provide --slurm_node_example_file.'
-            )
-            print("")
-            return scheduler, None, df_user
-        return scheduler, df_slurm_node, df_user
+        return None, df_user
+    return df_node, df_user
+
+
+def _get_uge_all_user_jobs(args, fallback, timeout_seconds):
+    command = getattr(args, "uge_job_command", "")
+    example_file = getattr(args, "uge_job_example_file", "")
+    if command == "" and example_file == "":
+        return fallback, False
+    job_lines = get_command_stdout_lines(
+        command_str=command,
+        example_file=example_file,
+        allow_failure=True,
+        command_name="--uge_job_command",
+        quiet_failure=True,
+        timeout_seconds=timeout_seconds,
+    )
+    if job_lines is None:
+        _print_degraded(
+            "AGE/UGE/SGE all-user jobs",
+            "--uge_job_command failed or timed out; using jobs embedded in qstat -F",
+        )
+        return fallback, False
+    payload = "\n".join(job_lines).lstrip()
+    if not payload.startswith(("{", "[")):
+        return get_user_df(job_lines), True
+    parsed = get_uge_json_job_df(job_lines)
+    if parsed is not None:
+        return parsed, True
+    _print_degraded(
+        "AGE/UGE/SGE all-user jobs",
+        "JSON schema was not recognized; using jobs embedded in qstat -F",
+    )
+    return fallback, False
+
+
+def _get_uge_df(args, timeout_seconds):
     if args.niter < 1:
         raise KFBatchUsageError("Exiting. --niter must be >= 1 when using qstat mode.")
+    df = None
     df_user = None
-    has_all_user_jobs = False
-    for i in range(args.niter):
+    for iteration in range(args.niter):
         lines = get_command_stdout_lines(
             command_str=args.stat_command,
             example_file=args.example_file,
@@ -2194,53 +2609,44 @@ def get_df(args):
             command_name="--stat_command",
             timeout_seconds=timeout_seconds,
         )
-        df_i = get_qstat_df(lines)
-        if df_i.shape[0] == 0:
+        snapshot = get_qstat_df(lines)
+        if snapshot.shape[0] == 0:
             raise KFBatchCommandError(
-                f"AGE/UGE/SGE resource snapshot {i + 1} contained no parseable queue instances."
+                f"AGE/UGE/SGE resource snapshot {iteration + 1} "
+                "contained no parseable queue instances."
             )
-        if i == 0:
-            df = df_i
-            df_user = get_user_df(lines)
-            uge_job_command = getattr(args, "uge_job_command", "")
-            uge_job_example_file = getattr(args, "uge_job_example_file", "")
-            if (uge_job_command != "") or (uge_job_example_file != ""):
-                job_lines = get_command_stdout_lines(
-                    command_str=uge_job_command,
-                    example_file=uge_job_example_file,
-                    allow_failure=True,
-                    command_name="--uge_job_command",
-                    quiet_failure=True,
-                    timeout_seconds=timeout_seconds,
-                )
-                if job_lines is not None:
-                    payload = "\n".join(job_lines).lstrip()
-                    if payload.startswith("{") or payload.startswith("["):
-                        df_user_json = get_uge_json_job_df(job_lines)
-                        if df_user_json is not None:
-                            df_user = df_user_json
-                            has_all_user_jobs = True
-                        else:
-                            _print_degraded(
-                                "AGE/UGE/SGE all-user jobs",
-                                "JSON schema was not recognized; using jobs embedded in qstat -F",
-                            )
-                    else:
-                        df_user = get_user_df(job_lines)
-                        has_all_user_jobs = True
-                else:
-                    _print_degraded(
-                        "AGE/UGE/SGE all-user jobs",
-                        "--uge_job_command failed or timed out; using jobs embedded in qstat -F",
-                    )
-            print_queued_job_summary(
-                df_user,
-                scheduler="uge",
-                current_user=get_current_user_name(),
-                all_users=has_all_user_jobs,
-            )
-        else:
-            df = _merge_qstat_iteration_min_availability(df, df_i)
+        if iteration > 0:
+            df = _merge_qstat_iteration_min_availability(df, snapshot)
+            continue
+        df = snapshot
+        df_user, has_all_user_jobs = _get_uge_all_user_jobs(
+            args,
+            get_user_df(lines),
+            timeout_seconds,
+        )
+        print_queued_job_summary(
+            df_user,
+            scheduler="uge",
+            current_user=get_current_user_name(),
+            all_users=has_all_user_jobs,
+        )
+    return df, df_user
+
+
+def get_df(args):
+    scheduler_override = getattr(args, "scheduler", "auto")
+    scheduler = (
+        get_scheduler_from_command(args.stat_command)
+        if scheduler_override == "auto"
+        else scheduler_override
+    )
+    if scheduler is None:
+        raise KFBatchUsageError(f"Exiting. --stat_command does not support: {args.stat_command}")
+    timeout_seconds = _command_timeout_from_args(args)
+    if scheduler == "slurm":
+        df, df_user = _get_slurm_df(args, timeout_seconds)
+    else:
+        df, df_user = _get_uge_df(args, timeout_seconds)
     return scheduler, df, df_user
 
 
@@ -2262,46 +2668,40 @@ def adjust_ram_unit(df):
     return df
 
 
-def print_cluster_summary(df):
-    queue_names = df["queue_name"].unique()
-    print(
-        "Reporting working/abnormal/total nodes, available/used/reserved/abnormal/total CPUs, and available/total RAM:"
-    )
-    for queue_name in queue_names:
-        df_queue = df.loc[(df["queue_name"] == queue_name), :].reset_index(drop=True)
-        is_abnormal_status = df_queue["status"] != ""
-        num_abnormal_node = is_abnormal_status.sum()
-        num_node = df_queue.shape[0]
-        num_working_node = num_node - num_abnormal_node
-        ncore_total = df_queue.loc[:, "ncore_total"].sum()
-        ncore_used = df_queue.loc[~is_abnormal_status, "ncore_used"].sum()
-        ncore_reserved = df_queue.loc[~is_abnormal_status, "ncore_resv"].sum()
-        ncore_abnormal = df_queue.loc[is_abnormal_status, "ncore_total"].sum()
-        ncore_available = df_queue.loc[~is_abnormal_status, "ncore_available"].sum()
-        mem_total = df_queue.loc[:, "hl:mem_total"].sum(min_count=1)
-        mem_available = df_queue.loc[~is_abnormal_status, "hc:mem_req"].sum(min_count=1)
-        mem_available_text = "?" if pandas.isna(mem_available) else floor_gib(mem_available)
-        mem_total_text = "?" if pandas.isna(mem_total) else floor_gib(mem_total)
-        txt = "{}: {}/{}/{} nodes, {}/{}/{}/{}/{} CPUs, and {}/{}GiB RAM"
-        print(
-            txt.format(
-                queue_name,
-                num_working_node,
-                num_abnormal_node,
-                num_node,
-                ncore_available,
-                ncore_used,
-                ncore_reserved,
-                ncore_abnormal,
-                ncore_total,
-                mem_available_text,
-                mem_total_text,
-            )
+def _normalized_output_path(path):
+    return pathlib.Path(path).expanduser().resolve(strict=False)
+
+
+def _atomic_write_tsv(df, output_path, label):
+    target = _normalized_output_path(output_path)
+    if not target.parent.is_dir():
+        raise KFBatchCommandError(
+            f"Failed to write {label}: parent directory does not exist: {target.parent}"
         )
-    print("")
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = pathlib.Path(handle.name)
+            df.to_csv(handle, sep="\t", index=False)
+        os.replace(temporary_path, target)
+    except (OSError, ValueError) as error:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise KFBatchCommandError(f"Failed to write {label}: {target}: {error}") from error
 
 
-def stat_main(args):
+def _resolve_output_paths(args):
     legacy_out = getattr(args, "out", "")
     explicit_node_out = getattr(args, "out_nodes", "")
     if legacy_out and explicit_node_out and legacy_out != explicit_node_out:
@@ -2310,100 +2710,153 @@ def stat_main(args):
         )
     node_output_path = explicit_node_out or legacy_out
     job_output_path = getattr(args, "out_jobs", "")
-    timeout_seconds = _command_timeout_from_args(args)
-    scheduler, df, df_user = get_df(args)
-    if job_output_path:
-        df_user.to_csv(job_output_path, sep="\t", index=False)
-    if (scheduler == "slurm") and (df is None):
-        print("Skipping cluster/node resource availability.")
-        print("Reason: no parsed SLURM node data was available.")
-        print(
-            'Provide --slurm_node_command or --slurm_node_example_file from "scontrol show node -o".'
-        )
-        if node_output_path:
-            _print_degraded(
-                "node TSV",
-                f"{node_output_path} was not written because no node table was available",
-            )
+    if (
+        node_output_path
+        and job_output_path
+        and _normalized_output_path(node_output_path) == _normalized_output_path(job_output_path)
+    ):
+        raise KFBatchUsageError("--out_jobs and --out_nodes must refer to different files.")
+    return node_output_path, job_output_path
+
+
+def _require_slurm_node_data(df, node_output_path):
+    if df is not None:
         return
-    if scheduler == "slurm":
-        reservation_lines = get_command_stdout_lines(
-            command_str=args.slurm_reservation_command,
-            example_file=args.slurm_reservation_example_file,
-            allow_failure=True,
-            command_name="--slurm_reservation_command",
-            quiet_failure=True,
-            timeout_seconds=timeout_seconds,
+    print("Skipping cluster/node resource availability.")
+    print("Reason: no parsed SLURM node data was available.")
+    print('Provide --slurm_node_command or --slurm_node_example_file from "scontrol show node -o".')
+    if node_output_path:
+        _print_degraded(
+            "node TSV",
+            f"{node_output_path} was not written because no node table was available",
         )
-        df_reservation = None
-        if reservation_lines is not None:
-            df_reservation = get_scontrol_reservation_df(
-                reservation_lines,
-                current_user=get_current_user_name(),
-            )
-            for warning in df_reservation.attrs.get("warnings", []):
-                _print_degraded("Slurm reservation", warning)
-            if df_reservation.shape[0] > 0:
-                df = apply_slurm_reservations(df, df_reservation)
-        else:
+    raise KFBatchCommandError("Slurm node/resource data is unavailable.")
+
+
+def _get_current_slurm_accounts(df_user, current_user):
+    if "account" not in df_user.columns:
+        return set()
+    accounts = set(
+        df_user.loc[df_user["user"].fillna("") == current_user, "account"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    accounts.discard("")
+    return accounts
+
+
+def _apply_slurm_reservation_state(df, df_user, args, timeout_seconds):
+    reservation_lines = get_command_stdout_lines(
+        command_str=args.slurm_reservation_command,
+        example_file=args.slurm_reservation_example_file,
+        allow_failure=True,
+        command_name="--slurm_reservation_command",
+        quiet_failure=True,
+        timeout_seconds=timeout_seconds,
+    )
+    if reservation_lines is None:
+        _print_degraded(
+            "Slurm reservation",
+            "--slurm_reservation_command failed or timed out; resource ceilings are suppressed",
+        )
+        return mark_unresolved_slurm_reservations(
+            mark_slurm_metadata_unknown(df, "reservation_state=UNKNOWN"),
+            None,
+        )
+    current_user = get_current_user_name()
+    df_reservation = get_scontrol_reservation_df(
+        reservation_lines,
+        current_user=current_user,
+        current_accounts=_get_current_slurm_accounts(df_user, current_user),
+    )
+    for warning in df_reservation.attrs.get("warnings", []):
+        _print_degraded("Slurm reservation", warning)
+    if df_reservation.shape[0] > 0:
+        df = apply_slurm_reservations(df, df_reservation)
+        for target in df.attrs.get("reservation_unresolved_targets", []):
             _print_degraded(
                 "Slurm reservation",
-                "--slurm_reservation_command failed or timed out; reserved nodes are treated as unavailable",
+                f"target could not be matched to a parsed node: {target}",
             )
-        df = mark_unresolved_slurm_reservations(df, df_reservation)
-    df = adjust_ram_unit(df)
-    if scheduler == "slurm" and args.show_launch_heuristic:
-        prio_lines = get_command_stdout_lines(
-            command_str=args.slurm_prio_command,
-            example_file=args.slurm_prio_example_file,
-            allow_failure=True,
-            command_name="--slurm_prio_command",
-            quiet_failure=True,
-            timeout_seconds=timeout_seconds,
+    return mark_unresolved_slurm_reservations(df, df_reservation)
+
+
+def _get_slurm_launch_frame(df, df_user, args, timeout_seconds):
+    if not args.show_launch_heuristic:
+        return None
+    prio_lines = get_command_stdout_lines(
+        command_str=args.slurm_prio_command,
+        example_file=args.slurm_prio_example_file,
+        allow_failure=True,
+        command_name="--slurm_prio_command",
+        quiet_failure=True,
+        timeout_seconds=timeout_seconds,
+    )
+    df_prio = None
+    if prio_lines is None:
+        _print_degraded(
+            "Slurm priority",
+            "--slurm_prio_command failed or timed out; launch estimates are resource-only",
         )
-        df_prio = None
-        if prio_lines is not None:
-            df_prio = get_sprio_df(prio_lines)
-            if df_prio.shape[0] == 0:
-                _print_degraded(
-                    "Slurm priority",
-                    "command succeeded but no priority rows were parsed",
-                )
-        else:
+    else:
+        df_prio = get_sprio_df(prio_lines)
+        if df_prio.shape[0] == 0:
             _print_degraded(
                 "Slurm priority",
-                "--slurm_prio_command failed or timed out; launch estimates are resource-only",
+                "command succeeded but no priority rows were parsed",
             )
-        current_user = get_current_user_name()
-        df_launch = get_slurm_launch_heuristic_df(
-            df_node=df, df_job=df_user, df_prio=df_prio, current_user=current_user
-        )
-        print_slurm_compact_summary(df, df_launch, args)
-    elif scheduler == "uge":
-        qfree_lines = get_command_stdout_lines(
-            command_str=getattr(args, "uge_qfree_command", ""),
-            example_file=getattr(args, "uge_qfree_example_file", ""),
-            allow_failure=True,
-            command_name="--uge_qfree_command",
-            quiet_failure=True,
-            timeout_seconds=timeout_seconds,
-        )
-        df_qfree = None
-        if qfree_lines is not None:
-            df_qfree = get_qfree_df(qfree_lines)
-            if df_qfree.shape[0] == 0:
-                _print_degraded(
-                    "qfree",
-                    "command succeeded but no queue summaries were parsed",
-                )
-        elif getattr(args, "uge_qfree_command", ""):
+    return get_slurm_launch_heuristic_df(
+        df_node=df,
+        df_job=df_user,
+        df_prio=df_prio,
+        current_user=get_current_user_name(),
+    )
+
+
+def _get_qfree_frame(args, timeout_seconds):
+    qfree_command = getattr(args, "uge_qfree_command", "")
+    qfree_lines = get_command_stdout_lines(
+        command_str=qfree_command,
+        example_file=getattr(args, "uge_qfree_example_file", ""),
+        allow_failure=True,
+        command_name="--uge_qfree_command",
+        quiet_failure=True,
+        timeout_seconds=timeout_seconds,
+    )
+    if qfree_lines is None:
+        if qfree_command:
             _print_degraded(
                 "qfree",
                 "--uge_qfree_command failed or timed out; quota columns are unavailable",
             )
-        print_uge_compact_summary(df, df_qfree, args)
+        return None
+    df_qfree = get_qfree_df(qfree_lines)
+    if df_qfree.shape[0] == 0:
+        _print_degraded(
+            "qfree",
+            "command succeeded but no queue summaries were parsed",
+        )
+    return df_qfree
+
+
+def stat_main(args):
+    node_output_path, job_output_path = _resolve_output_paths(args)
+    timeout_seconds = _command_timeout_from_args(args)
+    scheduler, df, df_user = get_df(args)
+    if job_output_path:
+        _atomic_write_tsv(df_user, job_output_path, "job TSV")
+    if scheduler == "slurm":
+        _require_slurm_node_data(df, node_output_path)
+        df = _apply_slurm_reservation_state(df, df_user, args, timeout_seconds)
+    df = adjust_ram_unit(df)
+    if scheduler == "slurm":
+        print_slurm_compact_summary(
+            df,
+            _get_slurm_launch_frame(df, df_user, args, timeout_seconds),
+            args,
+        )
     else:
-        print_cluster_summary(df)
-        print_resource_availability(df, args)
+        print_uge_compact_summary(df, _get_qfree_frame(args, timeout_seconds), args)
     if node_output_path:
-        df.to_csv(node_output_path, sep="\t", index=False)
+        _atomic_write_tsv(df, node_output_path, "node TSV")

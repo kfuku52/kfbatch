@@ -1,0 +1,5 @@
+Account|User|RawShares|NormShares|RawUsage|EffectvUsage|FairShare
+account_a||1|0.500000|100|0.500000|
+account_a|user_a|1|0.500000|10|0.100000|0.800000
+account_a|current_user|1|0.500000|20|0.200000|0.500000
+account_b|user_c|1|0.500000|30|0.300000|0.200000
