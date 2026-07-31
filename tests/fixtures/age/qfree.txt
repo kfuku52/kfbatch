@@ -5,6 +5,9 @@ SUMMARY OF RUNNING JOBS
       mjobs.q          4         8    128       64    24    16     256
        intr.q          0         0     24        1     7     0       8
 THE NUMBER OF RUNNING JOBS BY USER IN THE GROUP (group_a)
+        QNAME     user_a    user_b
+      mjobs.q          4         4
+           qw          0       200
 ====================== QUOTA BY MEM_REQ =====================
 SUMMARY OF RUNNING JOBS ( MEM_REQ )
                     user_a   group_a QUOTA      ALL
@@ -13,3 +16,5 @@ SUMMARY OF RUNNING JOBS ( MEM_REQ )
       mjobs.q          8        16      -      128    24    16     512
        intr.q          0         0      -        2     7     0      32
 THE NUMBER OF MEM_REQ BY USER IN THE GROUP (group_a)
+        QNAME     user_a    user_b
+      mjobs.q          8         8

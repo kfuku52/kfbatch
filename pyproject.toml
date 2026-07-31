@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [
     {name = "Kenji Fukushima", email = "kfuku52@gmail.com"},
 ]
-keywords = ["batch", "cluster", "slurm", "altair-grid-engine", "uge", "sge"]
+keywords = ["batch", "cluster", "slurm", "altair-grid-engine", "uge", "sge", "quota", "lustre"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

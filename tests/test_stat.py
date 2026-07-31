@@ -1093,6 +1093,8 @@ def test_get_qfree_df_parses_slot_and_memory_summaries():
         "      mjobs.q          3        10   1024     3828   120   192    5376",
         "       lmem.q          0         1      0      381   195     0     576",
         "THE NUMBER OF RUNNING JOBS BY USER IN THE GROUP (grp)",
+        "        QNAME         me     peer",
+        "      mjobs.q          3        7",
         "====================== QUOTA BY MEM_REQ =====================",
         "SUMMARY OF RUNNING JOBS ( MEM_REQ )",
         "                    me       grp  QUOTA      ALL",
@@ -1111,6 +1113,8 @@ def test_get_qfree_df_parses_slot_and_memory_summaries():
     assert int(mjobs["standby_slots"]) == 192
     assert int(mjobs["all_mem_req_gb"]) == 33221
     assert pandas.isna(mjobs["quota_mem_gb"])
+    assert df.attrs["group_name"] == "grp"
+    assert df.attrs["group_users"] == ["me", "peer"]
 
 
 def test_get_qstat_df_includes_last_node():
