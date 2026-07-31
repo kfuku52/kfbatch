@@ -15,6 +15,14 @@ from kfbatch.stat import (
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI_PATH = REPO_ROOT / "kfbatch" / "kfbatch"
+SLURM_OPTIONAL_FIXTURE_ARGS = [
+    "--current_user",
+    "current_user",
+    "--slurm_share_example_file",
+    "tests/fixtures/slurm/sshare.txt",
+    "--slurm_prio_example_file",
+    "tests/fixtures/slurm/sprio.txt",
+]
 
 
 def _run_cli(args, extra_env=None):
@@ -120,6 +128,7 @@ def test_slurm_cli_writes_valid_tsv(tmp_path):
             "tests/fixtures/slurm/reservations.txt",
             "--out",
             str(out_file),
+            *SLURM_OPTIONAL_FIXTURE_ARGS,
         ]
     )
     assert out.returncode == 0
@@ -143,6 +152,7 @@ def test_slurm_cli_truncated_squeue_reports_estimated_note():
             "tests/fixtures/slurm/partitions.txt",
             "--slurm_reservation_example_file",
             "tests/fixtures/slurm/reservations.txt",
+            *SLURM_OPTIONAL_FIXTURE_ARGS,
         ]
     )
     assert out.returncode == 0
@@ -163,10 +173,11 @@ def test_slurm_cli_uses_compact_partition_table():
             "tests/fixtures/slurm/partitions.txt",
             "--slurm_reservation_example_file",
             "tests/fixtures/slurm/reservations.txt",
+            *SLURM_OPTIONAL_FIXTURE_ARGS,
         ]
     )
     assert out.returncode == 0
-    assert "jobs  self:R/Q/X=" in out.stdout
+    assert "jobs  self:R/Q/X/O=" in out.stdout
     assert "part" in out.stdout
     assert "cpu(a/u/t)" in out.stdout
     assert "ram(a/t)GiB" in out.stdout
@@ -188,6 +199,7 @@ def test_slurm_cli_reports_fairshare_ranks_from_fixture():
             "tests/fixtures/slurm/reservations.txt",
             "--slurm_share_example_file",
             "tests/fixtures/slurm/sshare.txt",
+            *SLURM_OPTIONAL_FIXTURE_ARGS,
         ],
         extra_env={"USER": "current_user", "LOGNAME": "current_user"},
     )
@@ -266,6 +278,7 @@ def test_slurm_cli_keeps_compact_layout_when_launch_heuristic_is_disabled():
             "no",
             "--show_launch_heuristic",
             "no",
+            *SLURM_OPTIONAL_FIXTURE_ARGS,
         ]
     )
     assert out.returncode == 0
@@ -288,6 +301,7 @@ def test_slurm_node_failure_writes_jobs_but_returns_nonzero(tmp_path):
             "no",
             "--out_jobs",
             str(jobs_path),
+            *SLURM_OPTIONAL_FIXTURE_ARGS,
         ]
     )
     assert out.returncode == 1
@@ -308,6 +322,7 @@ def test_slurm_reservation_failure_suppresses_resource_ceiling():
             "false",
             "--show_fairshare_rank",
             "no",
+            *SLURM_OPTIONAL_FIXTURE_ARGS,
         ]
     )
     assert out.returncode == 0
@@ -325,6 +340,50 @@ def test_cli_rejects_same_node_and_job_output_path_before_scheduler_access(tmp_p
             str(output_path),
         ]
     )
-    assert out.returncode == 1
+    assert out.returncode == 2
     assert "must refer to different files" in out.stderr
     assert not output_path.exists()
+
+
+def test_slurm_cli_rejects_nonempty_unrecognized_job_output(tmp_path):
+    malformed = tmp_path / "malformed-squeue.txt"
+    malformed.write_text("warning: output format changed\n", encoding="utf-8")
+    out = _run_cli(
+        [
+            "--scheduler",
+            "slurm",
+            "--example_file",
+            str(malformed),
+            "--show_fairshare_rank",
+            "no",
+            "--show_launch_heuristic",
+            "no",
+        ]
+    )
+    assert out.returncode == 1
+    assert "non-empty but contained no recognized squeue rows" in out.stderr
+
+
+def test_slurm_cli_suppresses_partition_for_unmatched_active_reservation(tmp_path):
+    reservation = tmp_path / "unmatched-reservation.txt"
+    reservation.write_text(
+        "ReservationName=unknown Nodes=does-not-exist NodeCnt=1 CoreCnt=8 "
+        "PartitionName=epyc Users=other State=ACTIVE\n",
+        encoding="utf-8",
+    )
+    out = _run_cli(
+        [
+            "--example_file",
+            "tests/fixtures/slurm/squeue_full.txt",
+            "--slurm_node_example_file",
+            "tests/fixtures/slurm/nodes.txt",
+            "--slurm_partition_example_file",
+            "tests/fixtures/slurm/partitions.txt",
+            "--slurm_reservation_example_file",
+            str(reservation),
+            *SLURM_OPTIONAL_FIXTURE_ARGS,
+        ]
+    )
+    assert out.returncode == 0
+    assert "resource ceilings are suppressed" in out.stdout
+    assert "epyc   0/2/2" in out.stdout

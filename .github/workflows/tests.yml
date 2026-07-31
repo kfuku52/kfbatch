@@ -43,9 +43,10 @@ jobs:
           cache: pip
       - name: Install minimum supported pandas
         run: |
-          python -m pip install "numpy<2" "pandas==1.5.3"
+          python -m pip install "pandas==2.2.2"
           python -m pip install --no-deps -e .
           python -m pip install pytest
+          python -c "import numpy, pandas; print(numpy.__version__, pandas.__version__)"
       - name: Run tests
         run: python -m pytest -q
 
@@ -68,6 +69,7 @@ jobs:
           python -m ruff check .
           python -m ruff format --check .
           python -m bandit -q -c pyproject.toml -r kfbatch
+          python -m mypy
       - name: Audit runtime dependencies
         run: python -m pip_audit .
       - name: Run tests with coverage
@@ -79,6 +81,10 @@ jobs:
             --cov-fail-under=70
       - name: Build wheel and source distribution
         run: python -m build
+      - name: Validate package metadata and wheel contents
+        run: |
+          python -m twine check --strict dist/*
+          check-wheel-contents dist/*.whl
       - name: Verify source distribution contents
         run: |
           tar -tzf dist/*.tar.gz | grep '/docs/assets/kfbatch-header.png$'
@@ -87,12 +93,34 @@ jobs:
           tar -tzf dist/*.tar.gz | grep '/benchmarks/benchmark_parsers.py$'
           tar -tzf dist/*.tar.gz | grep '/kfbatch/kfbatch$'
           tar -tzf dist/*.tar.gz | grep '/CHANGELOG.md$'
-      - name: Install built wheel and check CLI
+      - name: Install built wheel and run fixture smoke test outside repository
         run: |
-          python -m pip install --force-reinstall --no-deps dist/*.whl
-          kfbatch --version
-          kfbatch -h
-          python -m kfbatch -h
+          wheel_path="$(realpath dist/*.whl)"
+          fixture_root="$GITHUB_WORKSPACE/tests/fixtures"
+          smoke_dir="$(mktemp -d)"
+          python -m venv /tmp/kfbatch-wheel-venv
+          /tmp/kfbatch-wheel-venv/bin/python -m pip install "$wheel_path"
+          cd "$smoke_dir"
+          /tmp/kfbatch-wheel-venv/bin/kfbatch --version
+          /tmp/kfbatch-wheel-venv/bin/python -m kfbatch -h
+          /tmp/kfbatch-wheel-venv/bin/kfbatch \
+            --current_user current_user \
+            --example_file "$fixture_root/slurm/squeue_full.txt" \
+            --slurm_node_example_file "$fixture_root/slurm/nodes.txt" \
+            --slurm_partition_example_file "$fixture_root/slurm/partitions.txt" \
+            --slurm_reservation_example_file "$fixture_root/slurm/reservations.txt" \
+            --slurm_prio_example_file "$fixture_root/slurm/sprio.txt" \
+            --slurm_share_example_file "$fixture_root/slurm/sshare.txt" \
+            > slurm.txt
+          grep 'all:R/Q/X/O=4/2/0/0' slurm.txt
+          /tmp/kfbatch-wheel-venv/bin/kfbatch \
+            --current_user current_user \
+            --stat_command "qstat -F" \
+            --example_file "$fixture_root/age/qstat_f_1.txt" \
+            --uge_job_example_file "$fixture_root/age/qstat_all_users.txt" \
+            --uge_qfree_example_file "$fixture_root/age/qfree.txt" \
+            > age.txt
+          grep 'all:R/Q/F=4/248/5' age.txt
       - name: Install source distribution in a clean environment
         run: |
           python -m venv /tmp/kfbatch-sdist-venv

@@ -23,17 +23,21 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "pandas>=1.5",
+    "pandas>=2.2.2",
 ]
 
 [project.optional-dependencies]
 dev = [
     "bandit",
     "build",
+    "check-wheel-contents",
+    "coverage>=7.10",
+    "mypy",
     "pip-audit",
     "pytest",
-    "pytest-cov",
+    "pytest-cov>=7",
     "ruff",
+    "twine",
 ]
 
 [project.urls]
@@ -54,6 +58,25 @@ include = ["kfbatch*"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+parallel = true
+patch = ["subprocess"]
+source = ["kfbatch"]
+
+[tool.coverage.report]
+fail_under = 70
+show_missing = true
+
+[tool.mypy]
+check_untyped_defs = true
+files = ["kfbatch"]
+ignore_missing_imports = true
+no_implicit_optional = true
+python_version = "3.10"
+warn_redundant_casts = true
+warn_unused_ignores = true
 
 [tool.ruff]
 line-length = 100
