@@ -28,7 +28,7 @@ Large scheduler reports are parsed with bounded memory use.
 Python 3.10 or newer is required.
 
 ```bash
-python -m pip install "git+https://github.com/kfuku52/kfbatch@main"
+python -m pip install "git+https://github.com/kfuku52/kfbatch@v0.3.0"
 kfbatch --version
 ```
 
@@ -68,20 +68,20 @@ kfbatch --stat_command "qstat -F" --uge_qfree_command ""
 
 ## Output
 
-Slurm uses one row per partition and reports task totals as running, queued, and
-other terminal/error states (`R/Q/X`):
+Slurm uses one row per partition and reports task totals as running, queued,
+terminal/error, and other recognized states (`R/Q/X/O`):
 
 ```text
-jobs  self:R/Q/X=0/1/0  all:R/Q/X=4/2/0
+jobs  self:R/Q/X/O=0/0/0/0  all:R/Q/X/O=4/2/0/0
 
-fairshare  self=0.500000  account=account_a  assoc_rank=2/3  pending_assoc_rank=2/2
+fairshare  self=0.500000  account=account_a  assoc_rank=2/3  pending_assoc_rank=n/a/1
 
 part   nodes  cpu(a/u/t)  ram(a/t)GiB  topCPU               topRAM               launch
-epyc   2/0/2  48/8/64     144/192      compute02 32c/64GiB  compute01 16c/80GiB  <=32c/64GiB
-short  0/1/1  0/0/16      ?/32         -                    -                    n/a
+epyc   2/0/2  48/8/64     144/192      compute02 32c/64GiB  compute01 16c/80GiB  res<=32c/64GiB
+short  0/1/1  0/0/16      ?/32         -                    -                    res<=0c/0GiB
 
-legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/total
-        launch=res<=CPU/RAM-only ceiling (reservation-adjusted, not a start guarantee)
+legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/total,
+        launch=res=CPU/RAM-only ceiling
 ```
 
 `assoc_rank` ranks user/account associations, not unique people. If the current
@@ -102,9 +102,11 @@ legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/to
         quota=self/group/limit slots (inf=unlimited), launch2G=immediate slots (+standby)
 ```
 
-`?` means that the scheduler did not provide a trustworthy value. Scheduler memory
-suffixes are interpreted as binary units and displayed in GiB (`1G = 1024M`).
-Available memory is floored so the display never rounds launch capacity upward.
+`?` means that the scheduler did not provide a trustworthy value. Slurm memory
+suffixes are binary when their unit is explicit; a unitless `squeue %m` request is
+kept ambiguous. Grid Engine follows its documented convention: lowercase suffixes
+are decimal and uppercase suffixes are binary. Values are displayed in GiB, and
+available memory is floored so the display never rounds launch capacity upward.
 
 ## Useful options
 
@@ -135,7 +137,8 @@ kfbatch \
   --slurm_partition_example_file tests/fixtures/slurm/partitions.txt \
   --slurm_reservation_example_file tests/fixtures/slurm/reservations.txt \
   --slurm_prio_example_file tests/fixtures/slurm/sprio.txt \
-  --show_fairshare_rank no
+  --slurm_share_example_file tests/fixtures/slurm/sshare.txt \
+  --current_user current_user
 ```
 
 ## TSV output
@@ -161,6 +164,7 @@ be written, the node TSV is not created, and the command returns a non-zero stat
 - The AGE queue table is the union of `qstat` and `qfree` queues, so quota-only and
   resource-only queues remain visible.
 - Unknown Slurm partition metadata is abnormal, never implicitly `UP`.
+- Unknown Slurm job states remain visible in the `O` total instead of disappearing.
 - Active Slurm reservations inaccessible to the current user are subtracted across
   every partition alias of the physical node. Access checks combine configured
   user, group, account, QOS, and partition restrictions. Unresolved or unavailable
@@ -169,6 +173,8 @@ be written, the node TSV is not created, and the command returns a non-zero stat
   prediction and does not model every scheduling constraint.
 - Required job/resource command failures return non-zero. Optional command failures
   print a `note: degraded ...` explanation.
+- Scheduler commands have bounded stdout, stderr, individual line lengths, and
+  execution time. Timeout cleanup includes descendant processes.
 - Scheduler output is decoded defensively, so invalid UTF-8 in a job name does not
   crash the report.
 

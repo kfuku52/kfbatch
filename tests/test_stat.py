@@ -1,5 +1,7 @@
+import os
 import shlex
 import sys
+import time
 from types import SimpleNamespace
 
 import pandas
@@ -8,7 +10,12 @@ import pytest
 import kfbatch.command as command_module
 import kfbatch.stat as stat_module
 from kfbatch.command import decode_scheduler_output
-from kfbatch.memory import floor_gib, memory_text_to_gib, slurm_request_memory_gib
+from kfbatch.memory import (
+    floor_gib,
+    grid_engine_memory_text_to_gib,
+    memory_text_to_gib,
+    slurm_request_memory_gib,
+)
 from kfbatch.stat import (
     QSTAT_COLUMNS,
     SLURM_SQUEUE_PARSE_FIELDS,
@@ -103,10 +110,10 @@ def test_get_command_stdout_lines_empty_command_raises():
         get_command_stdout_lines("", allow_failure=False, quiet_failure=True)
 
 
-def test_get_command_stdout_lines_missing_example_file_allow_failure():
+def test_get_command_stdout_lines_missing_example_file_allow_failure(tmp_path):
     out = get_command_stdout_lines(
         "echo hi",
-        example_file="/tmp/this_file_should_not_exist_for_kfbatch_tests",
+        example_file=str(tmp_path / "missing"),
         allow_failure=True,
         quiet_failure=True,
     )
@@ -134,16 +141,82 @@ def test_get_command_stdout_lines_replaces_invalid_utf8(tmp_path):
     assert lines == ["valid", "invalid-\ufffd-name"]
 
 
-def test_get_command_stdout_lines_spools_large_output(monkeypatch):
-    monkeypatch.setattr(command_module, "STDOUT_SPOOL_MEMORY_LIMIT_BYTES", 16)
+def test_get_command_stdout_lines_rejects_excessive_output(monkeypatch):
+    monkeypatch.setattr(command_module, "MAX_STDOUT_BYTES", 16)
     code = "import sys; sys.stdout.write('first\\n' + 'x' * 64 + '\\nlast')"
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
-    lines = get_command_stdout_lines(command, command_name="large fixture")
-    assert lines == ["first", "x" * 64, "last"]
+    with pytest.raises(KFBatchCommandError) as captured:
+        get_command_stdout_lines(command, command_name="large fixture")
+    assert captured.value.output_limited is True
+
+
+def test_get_command_stdout_lines_rejects_fifo_example_file(tmp_path):
+    fifo = tmp_path / "scheduler.fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(KFBatchCommandError, match="only regular files"):
+        get_command_stdout_lines("unused", example_file=str(fifo), timeout_seconds=0.01)
+
+
+def test_get_command_stdout_lines_kills_descendants_on_timeout(tmp_path):
+    marker = tmp_path / "descendant-survived"
+    child_code = (
+        f"import pathlib,time;time.sleep(0.4);pathlib.Path({str(marker)!r}).write_text('survived')"
+    )
+    parent_code = (
+        "import subprocess,sys,time;"
+        f"subprocess.Popen([sys.executable,'-c',{child_code!r}]);"
+        "time.sleep(5)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(parent_code)}"
+    with pytest.raises(KFBatchCommandError) as captured:
+        get_command_stdout_lines(command, timeout_seconds=0.05)
+    assert captured.value.timed_out is True
+    time.sleep(0.5)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("timeout", [-1, float("nan"), float("inf"), "invalid"])
+def test_get_command_stdout_lines_rejects_invalid_direct_timeout(timeout):
+    with pytest.raises(KFBatchCommandError, match="timeout must be"):
+        get_command_stdout_lines("true", timeout_seconds=timeout)
+
+
+def test_get_command_stdout_lines_does_not_echo_sensitive_argv():
+    secret = "PLACEHOLDER_SECRET_9b5f"
+    command = (
+        f"{shlex.quote(sys.executable)} -c {shlex.quote('raise SystemExit(2)')} --token={secret}"
+    )
+    with pytest.raises(KFBatchCommandError) as captured:
+        get_command_stdout_lines(command, command_name="secret fixture")
+    assert secret not in str(captured.value)
+    assert captured.value.returncode == 2
+
+
+def test_get_command_stdout_lines_removes_ambient_squeue_filters(
+    tmp_path,
+    monkeypatch,
+):
+    executable = tmp_path / "squeue"
+    executable.write_text(
+        f"#!{sys.executable}\nimport os\nprint(os.environ.get('SQUEUE_USERS', '<unset>'))\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("SQUEUE_USERS", "someone_else")
+    assert get_command_stdout_lines(str(executable)) == ["<unset>"]
 
 
 def test_decode_scheduler_output_falls_back_from_unknown_locale(monkeypatch):
     monkeypatch.setattr(command_module.locale, "getpreferredencoding", lambda _do_setlocale: "x")
+    assert decode_scheduler_output("日本語".encode()) == "日本語"
+
+
+def test_decode_scheduler_output_prefers_utf8_over_single_byte_locale(monkeypatch):
+    monkeypatch.setattr(
+        command_module.locale,
+        "getpreferredencoding",
+        lambda _do_setlocale: "iso8859-1",
+    )
     assert decode_scheduler_output("日本語".encode()) == "日本語"
 
 
@@ -226,11 +299,27 @@ def test_get_squeue_user_df_keeps_legacy_account_empty():
     assert df.at[0, "pending_reason"] == "Priority"
 
 
+def test_get_squeue_user_df_skips_tab_delimited_header():
+    df = get_squeue_user_df(
+        ["JOBID\tPARTITION\tNAME\tUSER\tACCOUNT\tST\tTIME\tNODES\tCPUS\tMEM\tLIMIT\tNODELIST"]
+    )
+    assert df.shape[0] == 0
+    assert df.attrs["recognized_header"] is True
+    assert df.attrs["candidate_rows"] == 0
+
+
+def test_get_squeue_user_df_reports_nonempty_unrecognized_input():
+    df = get_squeue_user_df(["warning: output format changed"])
+    assert df.shape[0] == 0
+    assert df.attrs["input_nonempty"] is True
+    assert df.attrs["rejected_rows"] == 1
+
+
 def test_get_scontrol_node_df_skips_nodes_without_partition_and_marks_reserved():
     lines = [
-        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 FreeMem=16000 State=IDLE Partitions=p1",
-        "NodeName=n2 Arch=x86_64 CPUAlloc=8 CPUEfctv=16 CPUTot=16 RealMemory=32000 FreeMem=8000 State=MIXED+RESERVED Partitions=p1",
-        "NodeName=n3 Arch=x86_64 CPUAlloc=0 CPUEfctv=8 CPUTot=8 RealMemory=16000 FreeMem=15000 State=IDLE Partitions=(null)",
+        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 AllocMem=16000 FreeMem=16000 State=IDLE Partitions=p1",
+        "NodeName=n2 Arch=x86_64 CPUAlloc=8 CPUEfctv=16 CPUTot=16 RealMemory=32000 AllocMem=24000 FreeMem=8000 State=MIXED+RESERVED Partitions=p1",
+        "NodeName=n3 Arch=x86_64 CPUAlloc=0 CPUEfctv=8 CPUTot=8 RealMemory=16000 AllocMem=1000 FreeMem=15000 State=IDLE Partitions=(null)",
     ]
     df = get_scontrol_node_df(lines, partition_state_map={"p1": "UP"})
     assert sorted(df["node_name"].tolist()) == ["n1", "n2"]
@@ -242,11 +331,12 @@ def test_get_scontrol_node_df_skips_nodes_without_partition_and_marks_reserved()
 
 def test_get_scontrol_node_df_marks_inactive_partition_as_abnormal():
     lines = [
-        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 FreeMem=16000 State=IDLE Partitions=p1",
+        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 AllocMem=16000 FreeMem=16000 State=IDLE Partitions=p1",
     ]
     df = get_scontrol_node_df(lines, partition_state_map={"p1": "INACTIVE"})
     assert df.shape[0] == 1
     assert df.at[0, "status"] == "partition_state=INACTIVE"
+    assert int(df.at[0, "ncore_available"]) == 0
 
 
 @pytest.mark.parametrize("partition_state_map", [None, {}])
@@ -255,7 +345,7 @@ def test_get_scontrol_node_df_treats_unknown_partition_metadata_as_abnormal(
 ):
     lines = [
         "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 "
-        "RealMemory=32000 FreeMem=16000 State=IDLE Partitions=p1",
+        "RealMemory=32000 AllocMem=16000 FreeMem=16000 State=IDLE Partitions=p1",
     ]
     df = get_scontrol_node_df(lines, partition_state_map=partition_state_map)
     assert df.shape[0] == 1
@@ -264,7 +354,7 @@ def test_get_scontrol_node_df_treats_unknown_partition_metadata_as_abnormal(
 
 def test_get_scontrol_node_df_treats_lowercase_up_as_up():
     lines = [
-        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 FreeMem=16000 State=IDLE Partitions=p1",
+        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 AllocMem=16000 FreeMem=16000 State=IDLE Partitions=p1",
     ]
     df = get_scontrol_node_df(lines, partition_state_map={"p1": "up"})
     assert df.shape[0] == 1
@@ -273,7 +363,7 @@ def test_get_scontrol_node_df_treats_lowercase_up_as_up():
 
 def test_get_scontrol_node_df_treats_up_star_as_up():
     lines = [
-        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 FreeMem=16000 State=IDLE Partitions=p1",
+        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 AllocMem=16000 FreeMem=16000 State=IDLE Partitions=p1",
     ]
     df = get_scontrol_node_df(lines, partition_state_map={"p1": "UP*"})
     assert df.shape[0] == 1
@@ -282,7 +372,7 @@ def test_get_scontrol_node_df_treats_up_star_as_up():
 
 def test_get_scontrol_node_df_marks_up_plus_drain_partition_as_abnormal():
     lines = [
-        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 FreeMem=16000 State=IDLE Partitions=p1",
+        "NodeName=n1 Arch=x86_64 CPUAlloc=4 CPUEfctv=16 CPUTot=16 RealMemory=32000 AllocMem=16000 FreeMem=16000 State=IDLE Partitions=p1",
     ]
     df = get_scontrol_node_df(lines, partition_state_map={"p1": "UP+DRAIN"})
     assert df.shape[0] == 1
@@ -317,6 +407,59 @@ def test_get_scontrol_node_df_preserves_unknown_memory():
     assert pandas.isna(df.at[0, "hl:mem_total"])
     assert bool(df.at[0, "hc:mem_req_known"]) is False
     assert bool(df.at[0, "hl:mem_total_known"]) is False
+    assert "memory_total=UNKNOWN" in df.at[0, "status"]
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "IDLE*",
+        "IDLE+COMPLETING",
+        "MIXED+INVALID_REG",
+        "IDLE+PERFCTRS",
+        "IDLE+POWERING_UP",
+        "IDLE+UNKNOWN_NEW_FLAG",
+    ],
+)
+def test_get_scontrol_node_df_suppresses_unavailable_or_unknown_states(state):
+    lines = [
+        "NodeName=n1 Arch=x86_64 CPUAlloc=0 CPUEfctv=16 CPUTot=16 "
+        f"RealMemory=64000 AllocMem=0 FreeMem=64000 State={state} Partitions=p1",
+    ]
+    df = get_scontrol_node_df(lines, partition_state_map={"p1": "UP"})
+    assert df.at[0, "status"] != ""
+    assert int(df.at[0, "ncore_available"]) == 0
+    assert df.at[0, "hc:mem_req"] == "0M"
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected_status"),
+    [
+        (
+            "CPUAlloc=0 CPUEfctv=16 CPUTot=16 RealMemory=64000 AllocMem=0",
+            "node_state=UNKNOWN",
+        ),
+        (
+            "CPUEfctv=16 CPUTot=16 RealMemory=64000 AllocMem=0 State=IDLE",
+            "cpu_alloc=UNKNOWN",
+        ),
+        (
+            "CPUAlloc=0 CPUEfctv=16 CPUTot=16 RealMemory=64000 FreeMem=60000 State=IDLE",
+            "memory_alloc=UNKNOWN",
+        ),
+    ],
+)
+def test_get_scontrol_node_df_suppresses_missing_required_metadata(
+    fields,
+    expected_status,
+):
+    df = get_scontrol_node_df(
+        [f"NodeName=n1 Arch=x86_64 {fields} Partitions=p1"],
+        partition_state_map={"p1": "UP"},
+    )
+    assert expected_status in df.at[0, "status"]
+    assert int(df.at[0, "ncore_available"]) == 0
+    assert bool(df.at[0, "hc:mem_req_known"]) is False or df.at[0, "hc:mem_req"] == "0M"
 
 
 def test_get_scontrol_reservation_df_counts_explicit_core_ids_and_single_node_fallback():
@@ -414,6 +557,40 @@ def test_get_scontrol_reservation_df_normalizes_null_partition():
     assert df.at[0, "queue_name"] == ""
 
 
+def test_get_scontrol_reservation_df_marks_multi_node_null_core_ids_unresolved():
+    lines = [
+        "ReservationName=r Nodes=n[1-2] NodeCnt=2 CoreCnt=8 "
+        "PartitionName=p1 Users=other State=ACTIVE",
+        "NodeName=n1 CoreIDs=(null)",
+        "NodeName=n2 CoreIDs=(null)",
+    ]
+    df = get_scontrol_reservation_df(lines, current_user="current_user")
+    assert df.shape[0] == 0
+    assert df.attrs["warnings"]
+    assert df.attrs["unresolved_partitions"] == ["p1"]
+
+
+def test_unresolved_reservation_partition_suppresses_resource_ceiling():
+    df_node = pandas.DataFrame(
+        {
+            "queue_name": ["p1", "p2"],
+            "node_name": ["n1", "n2"],
+            "status": ["", ""],
+            "ncore_available": [8, 8],
+            "hc:mem_req": ["8000M", "8000M"],
+            "hc:mem_req_known": [True, True],
+        }
+    )
+    out = stat_module.suppress_slurm_resource_ceiling(
+        df_node,
+        {"p1"},
+        "reservation_state=UNKNOWN",
+    )
+    assert out["ncore_available"].tolist() == [0, 8]
+    assert out["hc:mem_req"].tolist() == ["0M", "8000M"]
+    assert out["status"].tolist() == ["reservation_state=UNKNOWN", ""]
+
+
 def test_apply_slurm_reservations_subtracts_partial_reservations_and_estimated_memory():
     df_node = pandas.DataFrame(
         {
@@ -442,6 +619,35 @@ def test_apply_slurm_reservations_subtracts_partial_reservations_and_estimated_m
     assert int(out.at[0, "reservation_cores"]) == 6
     assert int(out.at[0, "reservation_mem_mb"]) == 6000
     assert out.at[0, "hc:mem_req"] == "26000M"
+
+
+def test_apply_slurm_reservations_is_idempotent():
+    df_node = pandas.DataFrame(
+        {
+            "queue_name": ["p1"],
+            "node_name": ["n1"],
+            "ncore_resv": [0],
+            "ncore_available": [8],
+            "ncore_total": [8],
+            "hl:mem_total": ["8000M"],
+            "hc:mem_req": ["8000M"],
+            "status": [""],
+        }
+    )
+    df_reservation = pandas.DataFrame(
+        {
+            "queue_name": ["p1"],
+            "node_name": ["n1"],
+            "reservation_name": ["r"],
+            "reserved_cores": [2],
+            "reserved_mem_mb": [2000],
+            "accessible": [False],
+        }
+    )
+    once = apply_slurm_reservations(df_node, df_reservation)
+    twice = apply_slurm_reservations(once, df_reservation)
+    assert int(twice.at[0, "ncore_available"]) == 6
+    assert twice.at[0, "hc:mem_req"] == "6000M"
 
 
 def test_apply_slurm_reservations_uses_explicit_reserved_memory_when_available():
@@ -622,6 +828,36 @@ def test_fairshare_summary_discloses_multi_account_selection(capsys):
     assert "selected=best_of_2_associations" in capsys.readouterr().out
 
 
+def test_fairshare_summary_labels_distinct_pending_account(capsys):
+    df_share = get_sshare_df(
+        [
+            "Account|User|RawShares|NormShares|RawUsage|EffectvUsage|FairShare",
+            " account_a|current_user|1|0.1|10|0.1|0.900000",
+            " account_b|current_user|1|0.1|20|0.2|0.400000",
+            " account_b|other|1|0.1|30|0.3|0.800000",
+        ]
+    )
+    df_job = pandas.DataFrame(
+        {
+            "job_id": ["1", "2"],
+            "user": ["current_user", "current_user"],
+            "account": ["account_a", "account_b"],
+            "state": ["R", "PD"],
+        }
+    )
+    summary = get_slurm_fairshare_rank_summary(
+        df_job=df_job,
+        df_share=df_share,
+        current_user="current_user",
+    )
+    assert summary["account"] == "account_a"
+    assert summary["pending_account"] == "account_b"
+    print_slurm_fairshare_rank_summary(summary)
+    out = capsys.readouterr().out
+    assert "account=account_a" in out
+    assert "pending_account=account_b" in out
+
+
 def test_get_slurm_launch_heuristic_keeps_resource_ceiling_when_priority_blocks_even_tiny_job():
     df_node = pandas.DataFrame(
         {
@@ -639,7 +875,7 @@ def test_get_slurm_launch_heuristic_keeps_resource_ceiling_when_priority_blocks_
             "user": ["current_user"],
             "state": ["PD"],
             "req_cpus": [1],
-            "req_mem": ["1G"],
+            "req_mem": ["1Gn"],
             "time_limit": ["00:05:00"],
             "pending_reason": ["Priority"],
             "resource_fields_complete": [True],
@@ -686,7 +922,7 @@ def test_get_slurm_launch_heuristic_matches_multi_partition_pending_jobs():
             "user": ["current_user"],
             "state": ["PD"],
             "req_cpus": [1],
-            "req_mem": ["1G"],
+            "req_mem": ["1Gn"],
             "time_limit": ["00:05:00"],
             "pending_reason": ["Priority"],
             "resource_fields_complete": [True],
@@ -714,6 +950,29 @@ def test_get_slurm_launch_heuristic_matches_multi_partition_pending_jobs():
     assert int(out.at[0, "blocked_req_cores"]) == 1
     assert int(out.at[0, "priority_gap"]) == 1701
     assert int(out.at[0, "fairshare_gap"]) == 1037
+
+
+def test_squeue_unsuffixed_memory_is_not_treated_as_per_node():
+    df_job = get_squeue_user_df(
+        ["2002\tepyc\tanalysis\tcurrent_user\taccount_a\tPD\t0:00\t1\t8\t2G\t00:05:00\t(Priority)"]
+    )
+    df_node = pandas.DataFrame(
+        {
+            "queue_name": ["epyc"],
+            "node_name": ["n1"],
+            "status": [""],
+            "ncore_available": [16],
+            "hc:mem_req": ["64G"],
+        }
+    )
+    out = get_slurm_launch_heuristic_df(
+        df_node,
+        df_job,
+        current_user="current_user",
+    )
+    assert out.at[0, "status"] == "priority_blocked_ambiguous_memory"
+    assert int(out.at[0, "blocked_req_cores"]) == 8
+    assert pandas.isna(out.at[0, "blocked_req_mem_gib"])
 
 
 def test_get_slurm_launch_heuristic_keeps_resource_ceiling_without_zero_sized_request_for_legacy_rows():
@@ -962,10 +1221,31 @@ def test_adjust_ram_unit_handles_lowercase_and_invalid_values():
     assert out.at[2, "hl:mem_total_unit"] == ""
 
 
+def test_grid_engine_memory_parser_distinguishes_decimal_and_binary_suffixes():
+    assert grid_engine_memory_text_to_gib("1g") == pytest.approx(1000**3 / 1024**3)
+    assert grid_engine_memory_text_to_gib("1G") == 1.0
+    assert grid_engine_memory_text_to_gib(str(1024**3)) == 1.0
+
+
+@pytest.mark.parametrize("value", ["INVALID", "12:xx:00", "1:99:00", "1:00:99"])
+def test_slurm_time_parser_rejects_malformed_values(value):
+    assert pandas.isna(stat_module._slurm_time_to_minutes(value))
+    assert stat_module._format_slurm_compact_time_limit(value) == "?"
+
+
+def test_slurm_time_parser_accepts_case_insensitive_unlimited():
+    assert stat_module._slurm_time_to_minutes("unlimited") == float("inf")
+    assert stat_module._format_slurm_compact_time_limit("unlimited") == "inf"
+
+
 def test_slurm_per_cpu_memory_and_display_floor_use_binary_units():
     assert slurm_request_memory_gib("2Gc", req_cpus=6, num_nodes=2) == 6.0
+    assert slurm_request_memory_gib("2Gn", req_cpus=6, num_nodes=2) == 2.0
+    assert pandas.isna(slurm_request_memory_gib("2G", req_cpus=6, num_nodes=2))
+    assert pandas.isna(slurm_request_memory_gib("1Gc", req_cpus="bad", num_nodes=1))
     assert memory_text_to_gib("1535M") == 1535 / 1024
     assert floor_gib(memory_text_to_gib("1535M")) == 1
+    assert floor_gib(float("inf")) is None
 
 
 def test_print_queued_job_summary_slurm_accepts_long_state_names(capsys):
@@ -979,7 +1259,22 @@ def test_print_queued_job_summary_slurm_accepts_long_state_names(capsys):
     )
     print_queued_job_summary(df_user, scheduler="slurm", current_user="current_user")
     out = capsys.readouterr().out
-    assert "jobs  self:R/Q/X=2/0/4  all:R/Q/X=2/3/4" in out
+    assert "jobs  self:R/Q/X/O=2/0/4/0  all:R/Q/X/O=2/3/4/0" in out
+
+
+def test_print_queued_job_summary_slurm_never_drops_other_or_unknown_states(capsys):
+    df_user = pandas.DataFrame(
+        {
+            "user": ["me"] * 6,
+            "state": ["S", "RS", "SI", "SO", "CD", "FUTURE_STATE"],
+            "total_slots": [1, 1, 1, 1, 1, 1],
+            "task_count_estimated": [False] * 6,
+        }
+    )
+    print_queued_job_summary(df_user, scheduler="slurm", current_user="me")
+    out = capsys.readouterr().out
+    assert "self:R/Q/X/O=0/0/0/6" in out
+    assert "unknown SLURM job state(s): FUTURE_STATE" in out
 
 
 def test_print_queued_job_summary_uge_matches_slurm_style(capsys):
@@ -1029,6 +1324,12 @@ def test_print_queued_job_summary_uge_marks_partial_job_source(capsys):
     assert "jobs  observed:R/Q/F=4/0/0  (all-user status unavailable)" in out
 
 
+def test_current_user_name_ignores_spoofed_login_environment(monkeypatch):
+    monkeypatch.setenv("LOGNAME", "reservation_owner")
+    monkeypatch.setenv("USER", "reservation_owner")
+    assert stat_module.get_current_user_name() != "reservation_owner"
+
+
 def test_print_slurm_compact_summary_uses_single_row_per_partition(capsys):
     df = pandas.DataFrame(
         {
@@ -1073,6 +1374,34 @@ def test_print_slurm_compact_summary_uses_single_row_per_partition(capsys):
     assert (
         "legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/total" in out
     )
+
+
+def test_all_tiers_keeps_requested_rows_when_primary_metric_is_unknown():
+    df = pandas.DataFrame(
+        {
+            "node_name": ["n1", "n2"],
+            "ncore_available": [8, 4],
+            "hc:mem_req": [float("nan"), float("nan")],
+        }
+    )
+    text = stat_module._format_compact_top_nodes(
+        df,
+        "hc:mem_req",
+        "ncore_available",
+        SimpleNamespace(ntop=1, all_tiers=True),
+    )
+    assert text.startswith("n1 8c/?GiB")
+
+
+def test_atomic_write_tsv_preserves_existing_permissions(tmp_path):
+    target = tmp_path / "nodes.tsv"
+    target.write_text("old\n", encoding="utf-8")
+    target.chmod(0o640)
+
+    stat_module._atomic_write_tsv(pandas.DataFrame({"node": ["n1"]}), target, "node TSV")
+
+    assert target.stat().st_mode & 0o777 == 0o640
+    assert target.read_text(encoding="utf-8") == "node\nn1\n"
 
 
 def test_print_uge_compact_summary_uses_qfree_queue_filter_and_quota(capsys):

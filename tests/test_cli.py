@@ -7,7 +7,7 @@ import pytest
 
 import kfbatch.cli as cli_module
 from kfbatch import __version__
-from kfbatch.errors import KFBatchCommandError
+from kfbatch.errors import KFBatchCommandError, KFBatchUsageError
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI_PATH = REPO_ROOT / "kfbatch" / "kfbatch"
@@ -99,7 +99,7 @@ def test_package_is_executable_as_a_module():
 
 def test_conflicting_node_output_aliases_are_rejected_before_scheduler_access():
     out = _run_cli(["--out", "legacy.tsv", "--out_nodes", "nodes.tsv"])
-    assert out.returncode == 1
+    assert out.returncode == 2
     assert "--out and --out_nodes" in out.stderr
 
 
@@ -125,7 +125,7 @@ def test_main_forwards_parsed_arguments(monkeypatch):
         observed["args"] = args
 
     monkeypatch.setattr("kfbatch.stat.stat_main", fake_stat_main)
-    assert cli_module.main(["kfbatch", "--scheduler", "uge", "--niter", "2"]) == 0
+    assert cli_module.main(["--scheduler", "uge", "--niter", "2"]) == 0
     assert observed["args"].scheduler == "uge"
     assert observed["args"].niter == 2
 
@@ -135,5 +135,31 @@ def test_main_converts_domain_error_to_exit_status(monkeypatch, capsys):
         raise KFBatchCommandError("synthetic failure")
 
     monkeypatch.setattr("kfbatch.stat.stat_main", fake_stat_main)
-    assert cli_module.main(["kfbatch"]) == 1
+    assert cli_module.main([]) == 1
     assert "synthetic failure" in capsys.readouterr().err
+
+
+def test_main_converts_usage_error_to_exit_status_two(monkeypatch, capsys):
+    def fake_stat_main(args):
+        raise KFBatchUsageError("synthetic usage failure")
+
+    monkeypatch.setattr("kfbatch.stat.stat_main", fake_stat_main)
+    assert cli_module.main([]) == 2
+    assert "synthetic usage failure" in capsys.readouterr().err
+
+
+def test_long_options_do_not_accept_ambiguous_abbreviations():
+    out = _run_cli(["--sched", "uge"])
+    assert out.returncode == 2
+    assert "unrecognized arguments" in out.stderr
+
+
+def test_niter_has_an_operational_upper_bound():
+    out = _run_cli(["--niter", str(cli_module.MAX_NITER + 1)])
+    assert out.returncode == 2
+    assert f"--niter must be <= {cli_module.MAX_NITER}" in out.stderr
+
+
+def test_current_user_override_is_exposed():
+    args = cli_module._build_parser().parse_args(["--current_user", "remote_user"])
+    assert args.current_user == "remote_user"

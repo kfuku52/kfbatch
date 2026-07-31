@@ -4,6 +4,49 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-31
+
+### Added
+
+- Add an explicit `--current_user` override for remote schedulers and fixture runs.
+- Add structured command failures, bounded stdout/stderr and line handling, process
+  group termination, and regression coverage for hostile or malformed scheduler
+  output.
+- Add type checking, wheel-content and metadata validation, subprocess coverage,
+  installed-wheel fixture smoke tests, and a tag-driven release workflow with
+  checksums, an SBOM, and build provenance attestations.
+
+### Changed
+
+- Require pandas 2.2.2 or newer and test the real minimum without pinning NumPy
+  below version 2.
+- Interpret Grid Engine lowercase memory suffixes as decimal and uppercase suffixes
+  as binary; treat unitless Slurm `%m` request memory as ambiguous rather than GiB.
+- Classify all known Slurm job and node states conservatively, preserve `R/Q/X/O`
+  totals, and suppress launch ceilings whenever capacity or reservation metadata
+  cannot be resolved safely.
+- Bound Grid Engine sampling to 100 snapshots and 300 seconds, make repeated
+  reservation adjustment idempotent, and pre-index launch heuristic inputs.
+- Preserve existing TSV permissions during atomic replacement.
+
+### Fixed
+
+- Reject non-regular fixture inputs without blocking, cap scheduler output without
+  deadlocking on full pipes, terminate inherited descendants on timeout, sanitize
+  `SQUEUE_*` environment overrides, and avoid exposing command arguments in errors.
+- Reject non-empty unrecognized scheduler output and invalid numeric/time fields
+  instead of silently reporting zero or free resources.
+- Resolve the effective local user independently of spoofable environment variables
+  and label FairShare account selection consistently.
+- Include every supported Slurm state in job summaries and retain the requested
+  number of top rows when the primary metric is unknown.
+
+### Security
+
+- Expand fixture privacy validation to emails, IPv4/IPv6 addresses, absolute paths,
+  scheduler identities, and recursively discovered capture-like files.
+- Document a private email fallback for vulnerability reports.
+
 ## [0.2.1] - 2026-07-30
 
 ### Changed
@@ -52,5 +95,6 @@ All notable changes to this project are documented here. The format follows
 - Removed live scheduler captures from the maintained tree and added fixture
   checks that reject non-synthetic identities and private network addresses.
 
+[0.3.0]: https://github.com/kfuku52/kfbatch/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/kfuku52/kfbatch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/kfuku52/kfbatch/releases/tag/v0.2.0

@@ -4,6 +4,8 @@ import sys
 
 from kfbatch import __version__
 
+MAX_NITER = 100
+
 
 def parse_bool(value):
     if isinstance(value, bool):
@@ -40,6 +42,7 @@ def _build_parser():
     parser = argparse.ArgumentParser(
         prog="kfbatch",
         description="Compact resource summaries for Slurm and AGE/UGE/SGE batch clusters.",
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--version",
@@ -57,6 +60,15 @@ def _build_parser():
         choices=["auto", "slurm", "uge"],
         default="auto",
         help="default=%(default)s: Scheduler override for wrappers or remote commands.",
+    )
+    parser.add_argument(
+        "--current_user",
+        metavar="NAME",
+        default="",
+        help=(
+            "default=effective local user: Scheduler user override for remote commands "
+            "and synthetic fixtures."
+        ),
     )
     parser.add_argument(
         "--example_file",
@@ -143,7 +155,7 @@ def _build_parser():
         metavar="INT",
         default=1,
         type=parse_positive_int,
-        help="default=%(default)s: Number of qstat snapshots merged conservatively.",
+        help=f"default=%(default)s: Number of qstat snapshots merged conservatively (max {MAX_NITER}).",
     )
     parser.add_argument(
         "--uge_job_command",
@@ -220,16 +232,21 @@ def _build_parser():
 
 def main(argv=None):
     if argv is None:
-        argv = sys.argv
+        argv = sys.argv[1:]
     parser = _build_parser()
-    args = parser.parse_args(list(argv)[1:])
+    args = parser.parse_args(list(argv))
 
-    from kfbatch.errors import KFBatchError
+    from kfbatch.errors import KFBatchCommandError, KFBatchUsageError
     from kfbatch.stat import stat_main
 
     try:
+        if args.niter > MAX_NITER:
+            raise KFBatchUsageError(f"--niter must be <= {MAX_NITER}.")
         stat_main(args)
-    except KFBatchError as error:
+    except KFBatchUsageError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    except KFBatchCommandError as error:
         print(str(error), file=sys.stderr)
         return 1
     return 0
