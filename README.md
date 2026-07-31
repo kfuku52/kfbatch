@@ -30,7 +30,7 @@ Large scheduler reports are parsed with bounded memory use.
 Python 3.10 or newer is required.
 
 ```bash
-python -m pip install "git+https://github.com/kfuku52/kfbatch@v0.4.0"
+python -m pip install "git+https://github.com/kfuku52/kfbatch"
 kfbatch --version
 ```
 
