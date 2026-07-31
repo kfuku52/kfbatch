@@ -58,6 +58,21 @@ _BYTE_FACTORS = {
     "P": 1024**5,
     "PI": 1024**5,
 }
+_QUOTA_SPACE_HEADER_FACTORS = {
+    "blocks": 1024,
+    "kbytes": 1024,
+    "mbytes": 1024**2,
+    "gbytes": 1024**3,
+    "tbytes": 1024**4,
+    "pbytes": 1024**5,
+    "space": 1024,
+}
+_QUOTA_FILE_HEADER_FACTORS = {
+    "files": 1,
+    "kfiles": 1000,
+    "mfiles": 1000**2,
+    "gfiles": 1000**3,
+}
 _UNLIMITED = {"", "-", "none", "unlimited", "inf", "infinite", "0"}
 
 
@@ -140,14 +155,15 @@ def _clean_numeric_token(value):
     return str(value).strip().rstrip("*")
 
 
-def _parse_bytes(value, *, unlimited_zero=False):
-    text = _clean_numeric_token(value)
+def _parse_bytes(value, *, unlimited_zero=False, default_factor=1024):
+    text = _clean_numeric_token(value).replace(",", "")
     if text.lower() in _UNLIMITED and (unlimited_zero or text != "0"):
         return None
     match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]i?|)[Bb]?", text, re.IGNORECASE)
     if match is None:
         return None
-    factor = _BYTE_FACTORS.get(match.group(2).upper())
+    unit = match.group(2).upper()
+    factor = default_factor if unit == "" else _BYTE_FACTORS.get(unit)
     if factor is None:
         return None
     return int(float(match.group(1)) * factor)
@@ -163,12 +179,30 @@ def _parse_count(value, *, unlimited_zero=False):
         return None
 
 
+def _quota_header_factors(line):
+    fields = re.split(r"\s+", str(line).strip().lower())
+    if len(fields) < 6 or fields[0] != "filesystem":
+        return None
+    space_factor = _QUOTA_SPACE_HEADER_FACTORS.get(fields[1])
+    file_factor = _QUOTA_FILE_HEADER_FACTORS.get(fields[5])
+    if space_factor is None or file_factor is None:
+        return None
+    return space_factor, file_factor
+
+
+def _scaled_count(value, factor, *, unlimited_zero=False):
+    count = _parse_count(value, unlimited_zero=unlimited_zero)
+    return None if count is None else count * factor
+
+
 def _parse_standard_quota(lines, provider):
     records = []
     section_scope = ""
     section_owner = ""
     saw_header = False
     pending_filesystem = ""
+    space_factor = 1024
+    file_factor = 1
     for raw_line in lines:
         line = str(raw_line).strip()
         match = _SECTION_RE.match(line)
@@ -180,10 +214,9 @@ def _parse_standard_quota(lines, provider):
             continue
         if section_scope == "" or line == "":
             continue
-        lower = line.lower()
-        if "filesystem" in lower and (
-            ("blocks" in lower) or ("kbytes" in lower) or ("space" in lower)
-        ):
+        header_factors = _quota_header_factors(line)
+        if header_factors is not None:
+            space_factor, file_factor = header_factors
             saw_header = True
             continue
         if not saw_header:
@@ -199,8 +232,8 @@ def _parse_standard_quota(lines, provider):
             continue
         filesystem = items[0]
         values = items[1:]
-        bytes_used = _parse_bytes(values[0])
-        files_used = _parse_count(values[4])
+        bytes_used = _parse_bytes(values[0], default_factor=space_factor)
+        files_used = _scaled_count(values[4], file_factor)
         if bytes_used is None:
             continue
         records.append(
@@ -210,11 +243,27 @@ def _parse_standard_quota(lines, provider):
                 scope=section_scope,
                 owner=section_owner,
                 bytes_used=bytes_used,
-                bytes_soft=_parse_bytes(values[1], unlimited_zero=True),
-                bytes_hard=_parse_bytes(values[2], unlimited_zero=True),
+                bytes_soft=_parse_bytes(
+                    values[1],
+                    unlimited_zero=True,
+                    default_factor=space_factor,
+                ),
+                bytes_hard=_parse_bytes(
+                    values[2],
+                    unlimited_zero=True,
+                    default_factor=space_factor,
+                ),
                 files_used=files_used,
-                files_soft=_parse_count(values[5], unlimited_zero=True),
-                files_hard=_parse_count(values[6], unlimited_zero=True),
+                files_soft=_scaled_count(
+                    values[5],
+                    file_factor,
+                    unlimited_zero=True,
+                ),
+                files_hard=_scaled_count(
+                    values[6],
+                    file_factor,
+                    unlimited_zero=True,
+                ),
                 grace="" if values[3] in {"-", "none"} else values[3],
             )
         )
@@ -342,6 +391,7 @@ def _collect_records(args):
             "No supported quota command was found. Install/use lfsq or quota, or provide "
             "--quota-command/--quota-example-file."
         )
+    completed_providers = set()
     for provider, command in candidates:
         lines = get_command_stdout_lines(
             command_str=command,
@@ -352,10 +402,15 @@ def _collect_records(args):
         )
         if lines is None:
             continue
+        completed_providers.add(provider)
         records = parse_quota_lines(lines, provider)
         if records:
             return records
     if any(provider == "lfsq" for provider, _command in candidates):
+        if "lfsq" in completed_providers:
+            raise KFBatchCommandError(
+                "lfsq completed successfully but returned no recognized quota rows."
+            )
         raise KFBatchCommandError(
             "lfsq did not return parseable quota data. On SHIROKANE, run qlogin first and "
             "then retry `kfbatch quota`; kfbatch never starts qlogin automatically."

@@ -233,3 +233,10 @@ def test_failed_lfsq_provider_explains_qlogin_without_starting_it():
     out = _run_cli(["quota", "--provider", "lfsq", "--quota-command", "false"])
     assert out.returncode == 1
     assert "run qlogin first" in out.stderr
+
+
+def test_unrecognized_successful_lfsq_output_does_not_explain_qlogin():
+    out = _run_cli(["quota", "--provider", "lfsq", "--quota-command", "printf unrecognized"])
+    assert out.returncode == 1
+    assert "completed successfully" in out.stderr
+    assert "qlogin" not in out.stderr

@@ -1,9 +1,12 @@
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
 from kfbatch.errors import KFBatchCommandError
 from kfbatch.quota import parse_quota_lines, quota_main
+
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "quota"
 
 
 def _args(**overrides):
@@ -40,6 +43,25 @@ def test_parse_standard_lustre_user_and_group_quota():
     assert records[0].bytes_used == 1024**3
     assert records[1].bytes_hard == 16 * 1024**3
     assert records[1].files_hard == 1600
+
+
+def test_parse_shirokane_lfsq_gbytes_and_kfiles():
+    records = parse_quota_lines(
+        (FIXTURE_ROOT / "lfsq.txt").read_text(encoding="utf-8").splitlines(),
+        "lfsq",
+    )
+
+    assert [(record.scope, record.owner) for record in records] == [
+        ("self", "user_a"),
+        ("group", "group_a"),
+    ]
+    assert records[0].bytes_used == 8 * 1024**3
+    assert records[0].bytes_hard is None
+    assert records[0].files_used == 34_000
+    assert records[1].bytes_used == 214 * 1024**3
+    assert records[1].bytes_hard == 6 * 1024**4
+    assert records[1].files_used == 327_000
+    assert records[1].files_hard == 6_000_000
 
 
 def test_quota_main_prints_personal_and_shared_group_rows(capsys):

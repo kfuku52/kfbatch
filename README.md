@@ -139,9 +139,11 @@ kfbatch quota --provider lustre \
   --quota-command "lfs quota -u user_a home_user_a"
 ```
 
-On SHIROKANE, `lfsq` must be run after `qlogin`. kfbatch reports that requirement
-when needed and never starts an interactive `qlogin` automatically. The ordinary
-`lfs quota` command can instead be supplied with `--quota-command` on a login node.
+On SHIROKANE, `lfsq` must be run after `qlogin`. kfbatch parses its `Gbytes` and
+`kfiles` columns with their reported scales, reports the `qlogin` requirement only
+when the command itself fails, and never starts an interactive session automatically.
+The ordinary `lfs quota` command can instead be supplied with `--quota-command` on
+a login node.
 
 Standard `quota`/`lfs quota` tables are parsed directly. A custom site wrapper can
 emit a whitespace-, tab-, or pipe-separated table whose required columns are

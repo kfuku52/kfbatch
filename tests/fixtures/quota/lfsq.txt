@@ -1,0 +1,6 @@
+Disk quotas for usr user_a (uid 1001):
+     Filesystem  Gbytes   quota   limit   grace   kfiles   quota   limit   grace
+     home_user_a       8       0       0       -      34       0       0       -
+Disk quotas for grp group_a (gid 2001):
+     Filesystem  Gbytes   quota   limit   grace   kfiles   quota   limit   grace
+     home_user_a     214       0   6,144       -     327       0   6,000       -

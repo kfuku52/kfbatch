@@ -281,6 +281,23 @@ def test_quota_subcommand_reports_personal_and_group_fixture_rows():
     assert "shared by all group members" in out.stdout
 
 
+def test_quota_subcommand_parses_shirokane_lfsq_units():
+    out = _run_cli(
+        [
+            "quota",
+            "--quota-example-file",
+            "tests/fixtures/quota/lfsq.txt",
+            "--current-user",
+            "user_a",
+        ]
+    )
+    assert out.returncode == 0
+    assert "8.0GiB/-/-" in out.stdout
+    assert "34,000/-/-" in out.stdout
+    assert "214GiB/-/6.0TiB" in out.stdout
+    assert "327,000/-/6,000,000" in out.stdout
+
+
 def test_qstat_cli_writes_valid_tsv(tmp_path):
     out_file = tmp_path / "qstat.tsv"
     out = _run_cli(
