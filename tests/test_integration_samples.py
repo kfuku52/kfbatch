@@ -209,6 +209,78 @@ def test_slurm_cli_reports_fairshare_ranks_from_fixture():
     assert "pending_assoc_rank=2/2" in out.stdout
 
 
+def test_batch_subcommand_reports_slurm_group_jobs_by_user():
+    out = _run_cli(
+        [
+            "batch",
+            "--example_file",
+            "tests/fixtures/slurm/squeue_fairshare.txt",
+            "--slurm_node_example_file",
+            "tests/fixtures/slurm/nodes.txt",
+            "--slurm_partition_example_file",
+            "tests/fixtures/slurm/partitions.txt",
+            "--slurm_reservation_example_file",
+            "tests/fixtures/slurm/reservations.txt",
+            "--slurm_share_example_file",
+            "tests/fixtures/slurm/sshare.txt",
+            "--slurm_prio_example_file",
+            "tests/fixtures/slurm/sprio.txt",
+            "--current_user",
+            "current_user",
+            "--scope",
+            "group",
+            "--by-user",
+        ]
+    )
+    assert out.returncode == 0
+    assert "group[account_a]:R/Q/X/O=0/2/0/0" in out.stdout
+    assert "current_user:R/Q/X/O=0/1/0/0" in out.stdout
+    assert "user_a:R/Q/X/O=0/1/0/0" in out.stdout
+
+
+def test_batch_subcommand_reports_uge_group_jobs_by_user():
+    out = _run_cli(
+        [
+            "batch",
+            "--scheduler",
+            "uge",
+            "--stat_command",
+            "qstat -F",
+            "--example_file",
+            "tests/fixtures/age/qstat_f_1.txt",
+            "--uge_job_example_file",
+            "tests/fixtures/age/qstat_all_users.txt",
+            "--uge_qfree_example_file",
+            "tests/fixtures/age/qfree.txt",
+            "--current_user",
+            "user_a",
+            "--scope",
+            "group",
+            "--by-user",
+        ]
+    )
+    assert out.returncode == 0
+    assert "group[group_a]:R/Q/F=4/200/0" in out.stdout
+    assert "user_a:R/Q/F=4/0/0" in out.stdout
+    assert "user_b:R/Q/F=0/200/0" in out.stdout
+
+
+def test_quota_subcommand_reports_personal_and_group_fixture_rows():
+    out = _run_cli(
+        [
+            "quota",
+            "--quota-example-file",
+            "tests/fixtures/quota/normalized.txt",
+            "--current-user",
+            "user_a",
+        ]
+    )
+    assert out.returncode == 0
+    assert "user_a" in out.stdout
+    assert "group_a" in out.stdout
+    assert "shared by all group members" in out.stdout
+
+
 def test_qstat_cli_writes_valid_tsv(tmp_path):
     out_file = tmp_path / "qstat.tsv"
     out = _run_cli(

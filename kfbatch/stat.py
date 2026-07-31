@@ -652,6 +652,35 @@ def _optional_int(value):
         return None
 
 
+def _qfree_group_context(lines):
+    ansi_escape = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    group_names = []
+    group_users: list[str] = []
+    in_group_table = False
+    for raw_line in lines:
+        line = ansi_escape.sub("", str(raw_line)).strip()
+        match = re.match(
+            r"THE NUMBER OF (?:RUNNING JOBS|MEM_REQ) BY USER IN THE GROUP \(([^)]+)\)",
+            line,
+        )
+        if match is not None:
+            group_names.append(match.group(1).strip())
+            in_group_table = True
+            continue
+        if line.startswith(("SUMMARY OF ", "======================")):
+            in_group_table = False
+            continue
+        items = re.split(r"\s+", line)
+        if in_group_table and items and items[0].upper() == "QNAME":
+            group_users.extend(
+                user
+                for user in items[1:]
+                if re.fullmatch(r"[A-Za-z0-9_.-]+", user) and user not in group_users
+            )
+    unique_names = set(group_names)
+    return (group_names[0] if len(unique_names) == 1 else ""), group_users
+
+
 def get_qfree_df(lines):
     columns = [
         "queue_name",
@@ -668,6 +697,8 @@ def get_qfree_df(lines):
         "all_mem_req_gb",
         "total_mem_gb",
     ]
+    lines = list(lines)
+    group_name, group_users = _qfree_group_context(lines)
     rows_by_queue: dict[str, dict[str, Any]] = {}
     queue_order = []
     mode = ""
@@ -720,7 +751,10 @@ def get_qfree_df(lines):
                 row["total_mem_gb"],
             ) = values
     rows = [rows_by_queue[queue_name] for queue_name in queue_order]
-    return pandas.DataFrame(rows, columns=columns)
+    frame = pandas.DataFrame(rows, columns=columns)
+    frame.attrs["group_name"] = group_name
+    frame.attrs["group_users"] = group_users
+    return frame
 
 
 def _count_slurm_array_task_expression(task_expression):
@@ -1722,7 +1756,6 @@ def get_sshare_df(lines):
         return df
     for col in ["norm_shares", "raw_usage", "effective_usage", "fairshare"]:
         df[col] = pandas.to_numeric(df[col], errors="coerce")
-    df = df.loc[df["fairshare"].notna(), :].copy()
     return df.reset_index(drop=True)
 
 
@@ -1888,7 +1921,24 @@ def _normalize_uge_job_state(state_raw, queue_name=""):
     return ""
 
 
-def print_queued_job_summary(df_user, scheduler="uge", current_user="", all_users=True):
+def _print_scoped_job_totals(self_text, all_text, scope):
+    if scope == "self":
+        print(f"jobs  {self_text}")
+    elif scope == "all":
+        print(f"jobs  {all_text}")
+    else:
+        print(f"jobs  {self_text}  {all_text}")
+
+
+def print_queued_job_summary(
+    df_user,
+    scheduler="uge",
+    current_user="",
+    all_users=True,
+    scope="overview",
+):
+    if scope == "group":
+        return
     if scheduler == "slurm":
         if df_user.shape[0] == 0:
             print("No jobs found in squeue output.")
@@ -1909,11 +1959,12 @@ def print_queued_job_summary(df_user, scheduler="uge", current_user="", all_user
             num_qwaiting_self = int(df_user.loc[is_qwaiting & is_self, "total_slots"].sum())
             num_error_self = int(df_user.loc[is_error & is_self, "total_slots"].sum())
             num_other_self = int(df_user.loc[is_other & is_self, "total_slots"].sum())
-            print(
-                "jobs  self:R/Q/X/O="
-                f"{num_running_self}/{num_qwaiting_self}/{num_error_self}/{num_other_self}  "
-                f"all:R/Q/X/O={num_running}/{num_qwaiting}/{num_error}/{num_other}"
+            self_text = (
+                "self:R/Q/X/O="
+                f"{num_running_self}/{num_qwaiting_self}/{num_error_self}/{num_other_self}"
             )
+            all_text = f"all:R/Q/X/O={num_running}/{num_qwaiting}/{num_error}/{num_other}"
+            _print_scoped_job_totals(self_text, all_text, scope)
         else:
             print(f"# of running job tasks (estimated from squeue): {num_running}")
             print(f"# of queued job tasks (estimated from squeue): {num_qwaiting}")
@@ -1966,9 +2017,9 @@ def print_queued_job_summary(df_user, scheduler="uge", current_user="", all_user
         num_running_self = int(df_user.loc[is_running & is_self, "total_slots"].sum())
         num_qwaiting_self = int(df_user.loc[is_qwaiting & is_self, "total_slots"].sum())
         num_error_self = int(df_user.loc[is_error & is_self, "total_slots"].sum())
-        print(
-            f"jobs  self:R/Q/F={num_running_self}/{num_qwaiting_self}/{num_error_self}  all:R/Q/F={num_running}/{num_qwaiting}/{num_error}"
-        )
+        self_text = f"self:R/Q/F={num_running_self}/{num_qwaiting_self}/{num_error_self}"
+        all_text = f"all:R/Q/F={num_running}/{num_qwaiting}/{num_error}"
+        _print_scoped_job_totals(self_text, all_text, scope)
     else:
         print(f"# of running AGE/UGE/SGE job slots: {num_running}")
         print(f"# of queued AGE/UGE/SGE job slots: {num_qwaiting}")
@@ -2812,8 +2863,13 @@ def _parsed_empty_but_input_unrecognized(frame):
 
 
 def _print_slurm_fairshare(args, df_user, current_user, timeout_seconds):
-    if not getattr(args, "show_fairshare_rank", True):
-        return
+    show_rank = getattr(args, "show_fairshare_rank", True)
+    needs_group_discovery = (
+        getattr(args, "scope", "overview") in {"overview", "group"}
+        and not str(getattr(args, "group_id", "") or "").strip()
+    )
+    if not show_rank and not needs_group_discovery:
+        return None
     share_lines = get_command_stdout_lines(
         command_str=getattr(args, "slurm_share_command", "sshare -a -P"),
         example_file=getattr(args, "slurm_share_example_file", ""),
@@ -2823,21 +2879,29 @@ def _print_slurm_fairshare(args, df_user, current_user, timeout_seconds):
         timeout_seconds=timeout_seconds,
     )
     if share_lines is None:
-        _print_degraded("Slurm FairShare", "--slurm_share_command failed or timed out")
-        return
+        component = "Slurm account/FairShare" if needs_group_discovery else "Slurm FairShare"
+        _print_degraded(component, "--slurm_share_command failed or timed out")
+        return None
     df_share = get_sshare_df(share_lines)
-    summary = get_slurm_fairshare_rank_summary(
-        df_job=df_user,
-        df_share=df_share,
-        current_user=current_user,
-    )
-    if summary is not None:
-        print_slurm_fairshare_rank_summary(summary)
+    if show_rank:
+        summary = get_slurm_fairshare_rank_summary(
+            df_job=df_user,
+            df_share=df_share,
+            current_user=current_user,
+        )
+        if summary is not None:
+            print_slurm_fairshare_rank_summary(summary)
+        elif df_share.shape[0] == 0:
+            _print_degraded(
+                "Slurm FairShare",
+                "command succeeded but no association rows were parsed",
+            )
     elif df_share.shape[0] == 0:
         _print_degraded(
-            "Slurm FairShare",
+            "Slurm account",
             "command succeeded but no association rows were parsed",
         )
+    return df_share
 
 
 def _get_slurm_partition_state_map(args, timeout_seconds):
@@ -2876,8 +2940,24 @@ def _get_slurm_df(args, timeout_seconds):
         raise KFBatchCommandError(
             "SLURM job output was non-empty but contained no recognized squeue rows."
         )
-    print_queued_job_summary(df_user, scheduler="slurm", current_user=current_user)
-    _print_slurm_fairshare(args, df_user, current_user, timeout_seconds)
+    print_queued_job_summary(
+        df_user,
+        scheduler="slurm",
+        current_user=current_user,
+        scope=getattr(args, "scope", "overview"),
+    )
+    df_share = _print_slurm_fairshare(args, df_user, current_user, timeout_seconds)
+    if getattr(args, "scope", "overview") in {"overview", "group"}:
+        from kfbatch.batch_scope import print_group_job_summary
+
+        print_group_job_summary(
+            df_user,
+            scheduler="slurm",
+            current_user=current_user,
+            group_id=getattr(args, "group_id", ""),
+            by_user=getattr(args, "by_user", False),
+            share_frame=df_share,
+        )
     partition_state_map = _get_slurm_partition_state_map(args, timeout_seconds)
     node_lines = get_command_stdout_lines(
         command_str=args.slurm_node_command,
@@ -2987,7 +3067,9 @@ def _get_uge_df(args, timeout_seconds):
             scheduler="uge",
             current_user=_current_user_from_args(args),
             all_users=has_all_user_jobs,
+            scope=getattr(args, "scope", "overview"),
         )
+        df_user.attrs["all_users"] = has_all_user_jobs
     return df, df_user
 
 
@@ -3250,6 +3332,18 @@ def stat_main(args):
             args,
         )
     else:
-        print_uge_compact_summary(df, _get_qfree_frame(args, timeout_seconds), args)
+        df_qfree = _get_qfree_frame(args, timeout_seconds)
+        if getattr(args, "scope", "overview") in {"overview", "group"}:
+            from kfbatch.batch_scope import print_group_job_summary
+
+            print_group_job_summary(
+                df_user,
+                scheduler="uge",
+                current_user=_current_user_from_args(args),
+                group_id=getattr(args, "group_id", ""),
+                by_user=getattr(args, "by_user", False),
+                qfree_frame=df_qfree,
+            )
+        print_uge_compact_summary(df, df_qfree, args)
     if node_output_path:
         _atomic_write_tsv(df, node_output_path, "node TSV")

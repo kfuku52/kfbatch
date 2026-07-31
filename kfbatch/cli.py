@@ -38,11 +38,12 @@ def parse_positive_int(value):
     return number
 
 
-def _build_parser():
+def _build_parser(*, prog="kfbatch", add_help=True):
     parser = argparse.ArgumentParser(
-        prog="kfbatch",
+        prog=prog,
         description="Compact resource summaries for Slurm and AGE/UGE/SGE batch clusters.",
         allow_abbrev=False,
+        add_help=add_help,
     )
     parser.add_argument(
         "--version",
@@ -227,22 +228,100 @@ def _build_parser():
         type=parse_bool,
         help="default=%(default)s: Show the current Slurm association FairShare rank.",
     )
+    parser.add_argument(
+        "--scope",
+        choices=["overview", "self", "group", "all"],
+        default="overview",
+        help=(
+            "default=%(default)s: Job summary scope. overview shows self, group, "
+            "and cluster totals when group data is available."
+        ),
+    )
+    parser.add_argument(
+        "--group-id",
+        "--group_id",
+        dest="group_id",
+        metavar="NAME",
+        default="",
+        help=(
+            "default=auto: Slurm account or AGE/UGE group to summarize. "
+            "Use this when automatic group discovery is unavailable."
+        ),
+    )
+    parser.add_argument(
+        "--by-user",
+        "--by_user",
+        dest="by_user",
+        action="store_true",
+        help="Break down group job totals by user.",
+    )
     return parser
+
+
+def _build_root_parser():
+    parser = argparse.ArgumentParser(
+        prog="kfbatch",
+        description="Inspect batch-cluster jobs/resources and filesystem quotas.",
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="{batch,quota}")
+    subparsers.add_parser(
+        "batch",
+        parents=[_build_parser(prog="kfbatch batch", add_help=False)],
+        add_help=True,
+        allow_abbrev=False,
+        help="Show batch jobs and scheduler resource availability.",
+        description="Compact resource summaries for Slurm and AGE/UGE/SGE batch clusters.",
+    )
+
+    from kfbatch.quota import add_quota_arguments
+
+    quota_parser = subparsers.add_parser(
+        "quota",
+        add_help=True,
+        allow_abbrev=False,
+        help="Show personal and group filesystem quotas.",
+        description="Compact personal and group filesystem quota summaries.",
+    )
+    add_quota_arguments(quota_parser)
+    return parser
+
+
+def _parse_command(argv):
+    if not argv:
+        return "batch", _build_parser().parse_args([])
+    if argv[0] in {"-h", "--help", "--version"}:
+        args = _build_root_parser().parse_args(argv)
+        return getattr(args, "command", None), args
+    if argv[0].startswith("-"):
+        return "batch", _build_parser().parse_args(argv)
+    args = _build_root_parser().parse_args(argv)
+    return args.command, args
 
 
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
-    parser = _build_parser()
-    args = parser.parse_args(list(argv))
+    command, args = _parse_command(list(argv))
 
     from kfbatch.errors import KFBatchCommandError, KFBatchUsageError
-    from kfbatch.stat import stat_main
 
     try:
-        if args.niter > MAX_NITER:
-            raise KFBatchUsageError(f"--niter must be <= {MAX_NITER}.")
-        stat_main(args)
+        if command == "quota":
+            from kfbatch.quota import quota_main
+
+            quota_main(args)
+        else:
+            from kfbatch.stat import stat_main
+
+            if args.niter > MAX_NITER:
+                raise KFBatchUsageError(f"--niter must be <= {MAX_NITER}.")
+            stat_main(args)
     except KFBatchUsageError as error:
         print(str(error), file=sys.stderr)
         return 2

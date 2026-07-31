@@ -31,11 +31,19 @@ def _run_cli(args):
 def test_legacy_stat_alias_is_rejected():
     out = _run_cli(["stat", "--stat_command", "qstat -F"])
     assert out.returncode != 0
-    assert "unrecognized arguments" in out.stderr
+    assert "invalid choice" in out.stderr
 
 
-def test_kfbatch_help_shows_stat_options_without_subcommands():
+def test_kfbatch_help_shows_subcommands():
     out = _run_cli(["-h"])
+    assert out.returncode == 0
+    assert "batch" in out.stdout
+    assert "quota" in out.stdout
+    assert "--stat_command" not in out.stdout
+
+
+def test_batch_help_shows_scheduler_options():
+    out = _run_cli(["batch", "-h"])
     assert out.returncode == 0
     assert "--stat_command" in out.stdout
     assert "--slurm_node_command" in out.stdout
@@ -44,13 +52,24 @@ def test_kfbatch_help_shows_stat_options_without_subcommands():
     assert "--out_nodes" in out.stdout
     assert "--out_jobs" in out.stdout
     assert "--command_timeout" in out.stdout
-    assert "subcommands" not in out.stdout.lower()
+    assert "--scope" in out.stdout
+    assert "--group-id" in out.stdout
+    assert "--by-user" in out.stdout
+
+
+def test_quota_help_shows_provider_and_scope_options():
+    out = _run_cli(["quota", "-h"])
+    assert out.returncode == 0
+    assert "--provider" in out.stdout
+    assert "--scope" in out.stdout
+    assert "--quota-command" in out.stdout
+    assert "--quota-example-file" in out.stdout
 
 
 def test_legacy_help_alias_is_rejected():
     out = _run_cli(["help", "stat"])
     assert out.returncode != 0
-    assert "unrecognized arguments" in out.stderr
+    assert "invalid choice" in out.stderr
 
 
 def test_unknown_option_returns_nonzero():
@@ -62,6 +81,12 @@ def test_unknown_option_returns_nonzero():
 def test_negative_command_timeout_is_rejected():
     out = _run_cli(["--command_timeout", "-1"])
     assert out.returncode != 0
+    assert "non-negative" in out.stderr
+
+
+def test_negative_quota_command_timeout_is_rejected():
+    out = _run_cli(["quota", "--command-timeout", "-1"])
+    assert out.returncode == 2
     assert "non-negative" in out.stderr
 
 
@@ -130,6 +155,18 @@ def test_main_forwards_parsed_arguments(monkeypatch):
     assert observed["args"].niter == 2
 
 
+def test_main_forwards_batch_subcommand_arguments(monkeypatch):
+    observed = {}
+
+    def fake_stat_main(args):
+        observed["args"] = args
+
+    monkeypatch.setattr("kfbatch.stat.stat_main", fake_stat_main)
+    assert cli_module.main(["batch", "--scope", "group", "--group-id", "account_a"]) == 0
+    assert observed["args"].scope == "group"
+    assert observed["args"].group_id == "account_a"
+
+
 def test_main_converts_domain_error_to_exit_status(monkeypatch, capsys):
     def fake_stat_main(args):
         raise KFBatchCommandError("synthetic failure")
@@ -163,3 +200,15 @@ def test_niter_has_an_operational_upper_bound():
 def test_current_user_override_is_exposed():
     args = cli_module._build_parser().parse_args(["--current_user", "remote_user"])
     assert args.current_user == "remote_user"
+
+
+def test_custom_quota_provider_requires_command():
+    out = _run_cli(["quota", "--provider", "custom"])
+    assert out.returncode == 2
+    assert "requires --quota-command" in out.stderr
+
+
+def test_failed_lfsq_provider_explains_qlogin_without_starting_it():
+    out = _run_cli(["quota", "--provider", "lfsq", "--quota-command", "false"])
+    assert out.returncode == 1
+    assert "run qlogin first" in out.stderr

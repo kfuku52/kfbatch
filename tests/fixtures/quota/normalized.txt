@@ -1,0 +1,3 @@
+scope owner filesystem bytes_used bytes_soft bytes_hard files_used files_soft files_hard grace
+self user_a home_user_a 3.5TiB - 5TiB 420000 - 500000 -
+group group_a home_group_a 71.2TiB 90TiB 100TiB 8200000 9000000 10000000 3days
