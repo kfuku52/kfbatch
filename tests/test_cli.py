@@ -143,6 +143,27 @@ def test_build_parser_exposes_scheduler_and_stable_priority_defaults():
     assert "%i|%r|%Y|%S|%A|%F|%J|%P" in args.slurm_prio_command
 
 
+@pytest.mark.parametrize(
+    ("available_commands", "expected"),
+    [
+        ({"squeue", "qstat"}, "squeue"),
+        ({"squeue"}, "squeue"),
+        ({"qstat"}, "qstat -F"),
+        (set(), "squeue"),
+    ],
+)
+def test_build_parser_auto_detects_stat_command(monkeypatch, available_commands, expected):
+    monkeypatch.setattr(
+        cli_module.shutil,
+        "which",
+        lambda command: f"/usr/bin/{command}" if command in available_commands else None,
+    )
+
+    args = cli_module._build_parser().parse_args([])
+
+    assert args.stat_command == expected
+
+
 def test_main_forwards_parsed_arguments(monkeypatch):
     observed = {}
 

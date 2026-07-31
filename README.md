@@ -49,6 +49,11 @@ kfbatch batch
 kfbatch quota
 ```
 
+`batch` auto-detects the locally available scheduler command. It prefers Slurm's
+`squeue`, falls back to `qstat -F` for AGE/UGE/SGE installations such as SHIROKANE,
+and retains the `squeue` default when neither command is available so the missing
+required command is reported clearly.
+
 Bare `kfbatch` remains a permanent compatibility alias for `kfbatch batch`, so
 existing invocations continue to work:
 

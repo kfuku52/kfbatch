@@ -1,10 +1,19 @@
 import argparse
 import math
+import shutil
 import sys
 
 from kfbatch import __version__
 
 MAX_NITER = 100
+
+
+def _default_stat_command():
+    if shutil.which("squeue") is not None:
+        return "squeue"
+    if shutil.which("qstat") is not None:
+        return "qstat -F"
+    return "squeue"
 
 
 def parse_bool(value):
@@ -53,8 +62,10 @@ def _build_parser(*, prog="kfbatch", add_help=True):
     parser.add_argument(
         "--stat_command",
         metavar="command",
-        default="squeue",
-        help="default=%(default)s: Command that shows cluster-wide batch job status.",
+        default=_default_stat_command(),
+        help=(
+            "default=%(default)s (auto-detected): Command that shows cluster-wide batch job status."
+        ),
     )
     parser.add_argument(
         "--scheduler",

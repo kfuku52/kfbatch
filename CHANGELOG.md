@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-31
+
+### Fixed
+
+- Auto-detect `qstat -F` as the default batch status command when `squeue` is
+  unavailable, so bare `kfbatch batch` works on SHIROKANE and other
+  AGE/UGE/SGE-only login nodes.
+
 ## [0.4.0] - 2026-07-31
 
 ### Added
@@ -123,6 +131,7 @@ All notable changes to this project are documented here. The format follows
 - Removed live scheduler captures from the maintained tree and added fixture
   checks that reject non-synthetic identities and private network addresses.
 
+[0.4.1]: https://github.com/kfuku52/kfbatch/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/kfuku52/kfbatch/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kfuku52/kfbatch/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/kfuku52/kfbatch/compare/v0.2.0...v0.2.1
