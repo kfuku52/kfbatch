@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-09-07
+
+### Fixed
+
+- Update CodeQL initialization and analysis together to 4.37.9, and group
+  future CodeQL Dependabot updates to prevent incompatible action versions.
+
 ## [0.4.2] - 2026-07-31
 
 ### Fixed
