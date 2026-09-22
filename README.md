@@ -275,21 +275,9 @@ be written, the node TSV is not created, and the command returns a non-zero stat
 All checked-in scheduler samples are small synthetic fixtures. Do not add live
 scheduler captures.
 
-```bash
-python -m pip install -e ".[dev]"
-python -m ruff check .
-python -m ruff format --check .
-python -m pytest --cov=kfbatch --cov-branch
-python -m build
-```
-
-Performance-sensitive changes can be checked with:
-
-```bash
-python -m benchmarks.benchmark_parsers
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
+See [CONTRIBUTING.md](CONTRIBUTING.md) for environment setup, the offline smoke
+command, change-specific tests, and delivery checks. Agent guidance starts at
+[AGENTS.md](AGENTS.md). See also [SECURITY.md](SECURITY.md) and
 [CHANGELOG.md](CHANGELOG.md).
 
 ## License

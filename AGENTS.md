@@ -34,3 +34,31 @@ Repository-specific instructions override these defaults.
 - For GitHub Actions edits, use `optimize-github-actions` in `.agents/skills/`.
   Preserve required coverage; never run untrusted PR code on self-hosted runners.
 <!-- END KF AGENT POLICY -->
+
+# Working in kfbatch
+
+- Start with the README's usage, output, and accuracy sections, then
+  [CONTRIBUTING.md](CONTRIBUTING.md) for setup and verification. Check the worktree
+  before edits. Commands run from the repository root in its activated development
+  environment; `pyproject.toml` is the tool/dependency configuration.
+- Entry points: `kfbatch/cli.py` dispatches batch to `stat.py` and quota to
+  `quota.py`; scheduler parsers and rendering are separated as described in
+  CONTRIBUTING. `command.py` owns subprocess bounds and failure handling.
+- Use CONTRIBUTING's **Local verification** table to select tests, and its
+  **Delivery checks** before push. It contains the exact pytest, lint, type,
+  security, and build commands; do not invent a second check runner. For reusable
+  fixture-based validation use
+  [.agents/skills/verify-kfbatch-change/SKILL.md](.agents/skills/verify-kfbatch-change/SKILL.md).
+- Preserve CONTRIBUTING's correctness invariants and the README's unit semantics:
+  unknown data is not free capacity, additional snapshots cannot increase
+  availability, and Slurm launch ceilings are not scheduling predictions. Keep
+  site defaults and resource assumptions unchanged unless the task requests them.
+- Preserve bare CLI invocation as `batch`, `--out` as the node-output alias,
+  separate node/job TSV schemas, and existing imports through `kfbatch.stat`.
+- Keep fixtures synthetic. Do not edit/commit live captures, private site settings,
+  generated TSVs, coverage output, build artifacts, or local environments. There is
+  no checked-in research dataset or separate analysis configuration to tune.
+- At completion report changed behavior/files, executed checks and results,
+  static-only checks, and environment-dependent omissions. Before publication use
+  `prepare-github-push`; follow the existing version/changelog scheme and report
+  the destination and commit. Do not create a release tag unless requested.
