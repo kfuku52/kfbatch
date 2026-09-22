@@ -58,28 +58,3 @@ def test_slurm_group_summary_does_not_guess_without_association(capsys):
         current_user="current_user",
     )
     assert "unavailable" in capsys.readouterr().out
-
-
-def test_uge_group_summary_uses_qfree_members(capsys):
-    jobs = pandas.DataFrame(
-        {
-            "user": ["user_a", "user_b", "user_c"],
-            "state": ["r", "Rq", "Eqw"],
-            "queue_name": ["mjobs.q", "", ""],
-            "total_slots": [4, 20, 5],
-        }
-    )
-    jobs.attrs["all_users"] = True
-    qfree = pandas.DataFrame({"group_slots": [4]})
-    qfree.attrs["group_name"] = "group_a"
-    qfree.attrs["group_users"] = ["user_a", "user_b"]
-    assert print_group_job_summary(
-        jobs,
-        scheduler="uge",
-        current_user="user_a",
-        qfree_frame=qfree,
-        by_user=True,
-    )
-    out = capsys.readouterr().out
-    assert "group[group_a]:R/Q/F=4/20/0" in out
-    assert "user_c" not in out

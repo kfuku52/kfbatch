@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-09-22
+
+### Changed
+
+- Consolidate overlapping CLI, parser, and resource-summary tests around observable
+  behavior; remove redundant mock forwarding and configuration-format assertions.
+
 ## [0.4.4] - 2026-09-07
 
 ### Fixed

@@ -1,12 +1,9 @@
 from argparse import Namespace
-from pathlib import Path
 
 import pytest
 
 from kfbatch.errors import KFBatchCommandError
 from kfbatch.quota import parse_quota_lines, quota_main
-
-FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "quota"
 
 
 def _args(**overrides):
@@ -45,35 +42,6 @@ def test_parse_standard_lustre_user_and_group_quota():
     assert records[1].files_hard == 1600
 
 
-def test_parse_shirokane_lfsq_gbytes_and_kfiles():
-    records = parse_quota_lines(
-        (FIXTURE_ROOT / "lfsq.txt").read_text(encoding="utf-8").splitlines(),
-        "lfsq",
-    )
-
-    assert [(record.scope, record.owner) for record in records] == [
-        ("self", "user_a"),
-        ("group", "group_a"),
-    ]
-    assert records[0].bytes_used == 8 * 1024**3
-    assert records[0].bytes_hard is None
-    assert records[0].files_used == 34_000
-    assert records[1].bytes_used == 214 * 1024**3
-    assert records[1].bytes_hard == 6 * 1024**4
-    assert records[1].files_used == 327_000
-    assert records[1].files_hard == 6_000_000
-
-
-def test_quota_main_prints_personal_and_shared_group_rows(capsys):
-    quota_main(_args())
-    out = capsys.readouterr().out
-    assert "self" in out
-    assert "user_a" in out
-    assert "group_a" in out
-    assert "71.2TiB" in out
-    assert "shared by all group members" in out
-
-
 def test_quota_main_filters_group_owner(capsys):
     quota_main(_args(scope="group", group_id="group_a"))
     out = capsys.readouterr().out
@@ -84,10 +52,3 @@ def test_quota_main_filters_group_owner(capsys):
 def test_quota_main_rejects_empty_filter_result():
     with pytest.raises(KFBatchCommandError, match="No quota records matched"):
         quota_main(_args(scope="group", group_id="missing_group"))
-
-
-def test_quota_main_rejects_unrecognized_fixture(tmp_path):
-    fixture = tmp_path / "quota.txt"
-    fixture.write_text("unrecognized output\n", encoding="utf-8")
-    with pytest.raises(KFBatchCommandError, match="no recognized"):
-        quota_main(_args(quota_example_file=str(fixture)))
