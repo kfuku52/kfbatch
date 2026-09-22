@@ -140,6 +140,16 @@ def _format_slurm_compact_launch_row(row):
     return resource_fields[0]
 
 
+def _print_compact_table(rows, columns):
+    """Print preformatted cells with shared column widths and two-space separators."""
+    widths = {}
+    for col in columns:
+        widths[col] = max([len(col)] + [len(str(row[col])) for row in rows])
+    print("  ".join([col.ljust(widths[col]) for col in columns]))
+    for row in rows:
+        print("  ".join([str(row[col]).ljust(widths[col]) for col in columns]))
+
+
 def print_slurm_compact_summary(df, df_launch, args):
     queue_names = [q for q in df["queue_name"].unique().tolist() if not str(q).startswith("login")]
     launch_rows = {}
@@ -198,29 +208,7 @@ def print_slurm_compact_summary(df, df_launch, args):
     if len(rows) == 0:
         return
     columns = ["part", "nodes", "cpu(a/u/t)", "ram(a/t)GiB", "topCPU", "topRAM", "launch"]
-    widths = {}
-    for col in columns:
-        widths[col] = len(col)
-        for row in rows:
-            widths[col] = max(widths[col], len(str(row[col])))
-    header = "  ".join(
-        [columns[0].ljust(widths[columns[0]])] + [col.ljust(widths[col]) for col in columns[1:]]
-    )
-    print(header)
-    for row in rows:
-        print(
-            "  ".join(
-                [
-                    str(row["part"]).ljust(widths["part"]),
-                    str(row["nodes"]).ljust(widths["nodes"]),
-                    str(row["cpu(a/u/t)"]).ljust(widths["cpu(a/u/t)"]),
-                    str(row["ram(a/t)GiB"]).ljust(widths["ram(a/t)GiB"]),
-                    str(row["topCPU"]).ljust(widths["topCPU"]),
-                    str(row["topRAM"]).ljust(widths["topRAM"]),
-                    str(row["launch"]).ljust(widths["launch"]),
-                ]
-            )
-        )
+    _print_compact_table(rows, columns)
     print("")
     print(
         "legend: nodes=working/abnormal/total, cpu=available/used/total, "
@@ -349,12 +337,7 @@ def print_uge_compact_summary(df, df_qfree, args):
         "quota(s/g/l)",
         "launch2G",
     ]
-    widths = {}
-    for col in columns:
-        widths[col] = max([len(col)] + [len(str(row[col])) for row in rows])
-    print("  ".join([col.ljust(widths[col]) for col in columns]))
-    for row in rows:
-        print("  ".join([str(row[col]).ljust(widths[col]) for col in columns]))
+    _print_compact_table(rows, columns)
     print("")
     print("legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/total")
     if qfree_rows:
