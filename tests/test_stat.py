@@ -1070,7 +1070,7 @@ def test_print_queued_job_summary_slurm_never_drops_other_or_unknown_states(caps
     )
     print_queued_job_summary(df_user, scheduler="slurm", current_user="me")
     out = capsys.readouterr().out
-    assert "self:R/Q/X/O=0/0/0/6" in out
+    assert "self:R/Q/X/O=1/0/0/5" in out
     assert "unknown SLURM job state(s): FUTURE_STATE" in out
 
 
@@ -1271,7 +1271,7 @@ def test_get_df_qstat_merges_memory_numerically(monkeypatch):
     scheduler, df, _ = get_df(args)
     assert scheduler == "uge"
     assert df.shape[0] == 1
-    assert df.at[0, "hc:mem_req"] == "1.000G"
+    assert grid_engine_memory_text_to_gib(df.at[0, "hc:mem_req"]) == 1.0
 
 
 def test_merge_qstat_snapshot_marks_disappearing_nodes_unavailable():

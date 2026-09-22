@@ -7,3 +7,4 @@ include kfbatch/kfbatch
 recursive-include docs/assets *.png
 recursive-include benchmarks *.py
 recursive-include tests *.py *.json *.txt
+recursive-include .github *.yml

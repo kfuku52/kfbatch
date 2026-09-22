@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2026-09-22
+
+### Fixed
+
+- Preserve Grid Engine job rows regardless of indentation, report partial parses,
+  and keep unknown Slurm account data from becoming zero group totals.
+- Use one exclusive Slurm state classification for personal, group, and cluster
+  totals, including STOPPED and STAGE_OUT aliases.
+- Parse empty quota grace columns and scaled inode counts, retain valid POSIX
+  quota output on over-limit exits, and match the /home mount itself.
+- Preserve zero effective CPUs and exact memory tokens across repeated snapshots.
+- Suppress uncertain reservation capacity across all aliases of a physical node
+  and bound hostlist range and Cartesian-product expansion.
+
+### Changed
+
+- Separate scheduler parsers and table rendering from orchestration while
+  preserving the existing stat module's importable functions and TSV schemas.
+- Track parser completeness and command exit diagnostics explicitly.
+- Require the full reusable validation workflow before tag publication; cancel
+  superseded branch/PR validation without interrupting release publication.
+
 ## [0.4.5] - 2026-09-22
 
 ### Changed

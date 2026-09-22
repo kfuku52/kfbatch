@@ -42,5 +42,18 @@ to make a sample output look more complete.
 
 Update `kfbatch.__version__` and `CHANGELOG.md` in the release commit. Push an
 annotated `vX.Y.Z` tag only after the `main` checks pass. The tag workflow verifies
-that the tag and package versions match, then publishes validated distributions,
+that the tag and package versions match and runs the full reusable validation
+workflow before publishing distributions,
 SHA-256 checksums, an SBOM, and build-provenance attestations to a GitHub release.
+
+## Correctness invariants
+
+Parser changes must preserve total task counts across exclusive state buckets,
+normalize long and short state names identically, and expose rejected rows and
+missing fields. Additional snapshots or missing metadata must never increase
+available capacity. Reservation uncertainty applies to every partition alias of
+an affected physical node. Use synthetic tests for these properties.
+
+Scheduler parsers live in `slurm_parser.py` and `uge_parser.py`, state semantics
+in `job_states.py`, rendering in `render.py`, and command orchestration in
+`stat.py`. Its existing parser and rendering imports remain compatibility aliases.

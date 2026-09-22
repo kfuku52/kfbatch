@@ -145,7 +145,11 @@ when the command itself fails, and never starts an interactive session automatic
 The ordinary `lfs quota` command can instead be supplied with `--quota-command` on
 a login node.
 
-Standard `quota`/`lfs quota` tables are parsed directly. A custom site wrapper can
+Standard `quota`/`lfs quota` tables are parsed directly, including empty grace
+columns and scaled file counts. The default Linux quota query uses unrounded
+values and raw grace expiry timestamps (Unix seconds; zero means no grace).
+Valid POSIX quota output is retained on status 1 with a diagnostic, since quota
+uses nonzero status to report exceeded limits. A custom site wrapper can
 emit a whitespace-, tab-, or pipe-separated table whose required columns are
 `scope owner filesystem bytes_used`; optional columns are `bytes_soft`,
 `bytes_hard`, `files_used`, `files_soft`, `files_hard`, and `grace`. Unitless space
@@ -250,6 +254,9 @@ be written, the node TSV is not created, and the command returns a non-zero stat
   resource-only queues remain visible.
 - Unknown Slurm partition metadata is abnormal, never implicitly `UP`.
 - Unknown Slurm job states remain visible in the `O` total instead of disappearing.
+- Rejected Slurm job rows fail the report; incomplete all-user Grid Engine output
+  is labeled degraded and cannot be presented as complete cluster totals.
+- Missing Slurm account fields make group totals unavailable, not zero.
 - Active Slurm reservations inaccessible to the current user are subtracted across
   every partition alias of the physical node. Access checks combine configured
   user, group, account, QOS, and partition restrictions. Unresolved or unavailable

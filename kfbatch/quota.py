@@ -8,9 +8,14 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
-from kfbatch.command import DEFAULT_COMMAND_TIMEOUT_SECONDS, get_command_stdout_lines
+from kfbatch.command import (
+    DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    get_command_result,
+    get_command_stdout_lines,
+)
 from kfbatch.errors import KFBatchCommandError, KFBatchUsageError
 
 pwd: Any
@@ -166,17 +171,18 @@ def _parse_bytes(value, *, unlimited_zero=False, default_factor=1024):
     factor = default_factor if unit == "" else _BYTE_FACTORS.get(unit)
     if factor is None:
         return None
-    return int(float(match.group(1)) * factor)
+    return int(Decimal(match.group(1)) * factor)
 
 
 def _parse_count(value, *, unlimited_zero=False):
     text = _clean_numeric_token(value).replace(",", "")
     if text.lower() in _UNLIMITED and (unlimited_zero or text != "0"):
         return None
-    try:
-        return int(text)
-    except ValueError:
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([kMGT]?)", text, re.IGNORECASE)
+    if match is None:
         return None
+    factor = {"": 1, "k": 1000, "m": 1000**2, "g": 1000**3, "t": 1000**4}[match.group(2).lower()]
+    return int(Decimal(match.group(1)) * factor)
 
 
 def _quota_header_factors(line):
@@ -193,6 +199,29 @@ def _quota_header_factors(line):
 def _scaled_count(value, factor, *, unlimited_zero=False):
     count = _parse_count(value, unlimited_zero=unlimited_zero)
     return None if count is None else count * factor
+
+
+def _standard_quota_values(values):
+    """Restore optional empty grace fields without shifting inode columns."""
+    space, tail = values[:3], values[3:]
+    if len(tail) == 3:
+        return space + [""] + tail + [""]
+    if len(tail) == 4:
+        if _parse_count(tail[0]) is None:
+            return space + tail + [""]
+        return space + [""] + tail
+    if len(tail) == 5:
+        return values
+    return None
+
+
+def _quota_grace(space, files):
+    empty = {"", "-", "none", "0"}
+    space = "" if space.lower() in empty else space
+    files = "" if files.lower() in empty else files
+    if files:
+        return f"space={space or '-'},files={files}"
+    return space
 
 
 def _parse_standard_quota(lines, provider):
@@ -228,10 +257,12 @@ def _parse_standard_quota(lines, provider):
         if pending_filesystem:
             items.insert(0, pending_filesystem)
             pending_filesystem = ""
-        if len(items) < 8:
+        if len(items) < 7:
             continue
         filesystem = items[0]
-        values = items[1:]
+        values = _standard_quota_values(items[1:])
+        if values is None:
+            continue
         bytes_used = _parse_bytes(values[0], default_factor=space_factor)
         files_used = _scaled_count(values[4], file_factor)
         if bytes_used is None:
@@ -264,7 +295,7 @@ def _parse_standard_quota(lines, provider):
                     file_factor,
                     unlimited_zero=True,
                 ),
-                grace="" if values[3] in {"-", "none"} else values[3],
+                grace=_quota_grace(values[3], values[7]),
             )
         )
     return records
@@ -358,14 +389,14 @@ def _provider_candidates(args):
     if args.provider == "lfsq":
         return [("lfsq", "lfsq")]
     if args.provider == "posix":
-        return [("posix", "quota -s -ug")]
+        return [("posix", "quota -w -p -ug")]
     if args.provider in {"lustre", "custom"}:
         raise KFBatchUsageError(f"--provider {args.provider} requires --quota-command.")
     candidates = []
     if shutil.which("lfsq"):
         candidates.append(("lfsq", "lfsq"))
     if shutil.which("quota"):
-        candidates.append(("posix", "quota -s -ug"))
+        candidates.append(("posix", "quota -w -p -ug"))
     return candidates
 
 
@@ -393,18 +424,25 @@ def _collect_records(args):
         )
     completed_providers = set()
     for provider, command in candidates:
-        lines = get_command_stdout_lines(
+        result = get_command_result(
             command_str=command,
             allow_failure=True,
             command_name="--quota-command",
             quiet_failure=True,
             timeout_seconds=args.command_timeout,
+            accepted_returncodes=(0, 1) if provider == "posix" else (0,),
         )
-        if lines is None:
+        if result is None:
             continue
         completed_providers.add(provider)
-        records = parse_quota_lines(lines, provider)
+        records = parse_quota_lines(result.stdout_lines, provider)
         if records:
+            if result.returncode:
+                print(
+                    "note: quota exited with status 1 (exceeded limit or partial result); showing parsed records."
+                )
+                if result.stderr:
+                    print(f"note: quota diagnostic: {result.stderr}")
             return records
     if any(provider == "lfsq" for provider, _command in candidates):
         if "lfsq" in completed_providers:
@@ -423,7 +461,8 @@ def _matches_filesystem(record, requested):
     if requested in {"", "all"}:
         return True
     if requested == "home":
-        return record.filesystem == "home" or record.filesystem.startswith("/home/")
+        path = os.path.normpath(record.filesystem)
+        return path in {"home", "/home"} or path.startswith("/home/")
     return requested in {record.filesystem, os.path.basename(record.filesystem.rstrip("/"))}
 
 

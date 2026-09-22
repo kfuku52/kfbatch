@@ -13,6 +13,7 @@ import stat
 import subprocess  # nosec B404
 import threading
 import time
+from dataclasses import dataclass
 
 from kfbatch.errors import KFBatchCommandError
 
@@ -23,6 +24,15 @@ MAX_OUTPUT_LINE_BYTES = 4 * 1024 * 1024
 STDERR_DETAIL_LIMIT_BYTES = 64 * 1024
 PROCESS_TERMINATION_GRACE_SECONDS = 0.5
 PROCESS_POLL_INTERVAL_SECONDS = 0.02
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Validated command output, retaining provider-specific exit semantics."""
+
+    returncode: int
+    stdout_lines: list[str]
+    stderr: str
 
 
 class _BoundedCapture:
@@ -137,6 +147,8 @@ def _subprocess_environment(command):
         for key in list(environment):
             if key.startswith("SQUEUE_"):
                 environment.pop(key, None)
+    if executable in {"quota", "lfs", "lfsq"}:
+        environment["LC_ALL"] = "C"
     return environment
 
 
@@ -278,6 +290,7 @@ def _command_result_lines(
     output_limited,
     allow_failure,
     quiet_failure,
+    accepted_returncodes=(0,),
 ):
     if timed_out:
         if allow_failure:
@@ -312,7 +325,7 @@ def _command_result_lines(
             returncode=returncode,
             output_limited=True,
         )
-    if returncode != 0:
+    if returncode not in accepted_returncodes:
         if allow_failure:
             return None
         summary = (
@@ -331,17 +344,18 @@ def _command_result_lines(
     return _decode_bounded_lines(stdout, command_name)
 
 
-def get_command_stdout_lines(
+def get_command_result(
     command_str,
     example_file="",
     allow_failure=False,
     command_name="command",
     quiet_failure=False,
     timeout_seconds=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    accepted_returncodes=(0,),
 ):
     if example_file:
         try:
-            return _read_example_file(example_file, command_name)
+            return CommandResult(0, _read_example_file(example_file, command_name), "")
         except KFBatchCommandError:
             if allow_failure:
                 return None
@@ -398,7 +412,7 @@ def get_command_stdout_lines(
             command_name=command_name,
             argv=command,
         ) from error
-    return _command_result_lines(
+    lines = _command_result_lines(
         command=command,
         command_name=command_name,
         timeout=timeout,
@@ -409,4 +423,28 @@ def get_command_stdout_lines(
         output_limited=output_limited,
         allow_failure=allow_failure,
         quiet_failure=quiet_failure,
+        accepted_returncodes=accepted_returncodes,
     )
+    if lines is None:
+        return None
+    return CommandResult(returncode, lines, _read_scheduler_error(stderr))
+
+
+def get_command_stdout_lines(
+    command_str,
+    example_file="",
+    allow_failure=False,
+    command_name="command",
+    quiet_failure=False,
+    timeout_seconds=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+):
+    """Compatibility interface for commands whose only successful status is zero."""
+    result = get_command_result(
+        command_str,
+        example_file=example_file,
+        allow_failure=allow_failure,
+        command_name=command_name,
+        quiet_failure=quiet_failure,
+        timeout_seconds=timeout_seconds,
+    )
+    return None if result is None else result.stdout_lines

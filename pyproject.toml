@@ -35,6 +35,7 @@ dev = [
     "mypy",
     "pip-audit",
     "pytest",
+    "PyYAML",
     "pytest-cov>=7",
     "ruff",
     "twine",
@@ -85,6 +86,9 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["B", "C901", "E", "F", "I", "UP"]
 ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

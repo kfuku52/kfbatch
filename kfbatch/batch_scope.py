@@ -4,46 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-_SLURM_RUNNING = {"R", "RUNNING", "CG", "COMPLETING", "ST", "STAGE_OUT"}
-_SLURM_QUEUED = {
-    "PD",
-    "PENDING",
-    "CF",
-    "CONFIGURING",
-    "RD",
-    "RESV_DEL_HOLD",
-    "RF",
-    "REQUEUE_FED",
-    "RH",
-    "REQUEUE_HOLD",
-    "RQ",
-    "REQUEUED",
-}
-_SLURM_ERROR = {
-    "BF",
-    "BOOT_FAIL",
-    "CA",
-    "CANCELLED",
-    "DL",
-    "DEADLINE",
-    "F",
-    "FAILED",
-    "LF",
-    "LAUNCH_FAILED",
-    "NF",
-    "NODE_FAIL",
-    "OOM",
-    "OUT_OF_MEMORY",
-    "PR",
-    "PREEMPTED",
-    "RV",
-    "REVOKED",
-    "SE",
-    "SPECIAL_EXIT",
-    "STOPPED",
-    "TO",
-    "TIMEOUT",
-}
+from kfbatch.job_states import slurm_bucket as _slurm_bucket, uge_bucket as _uge_bucket
 
 
 @dataclass(frozen=True)
@@ -52,28 +13,6 @@ class JobTotals:
     queued: int = 0
     failed: int = 0
     other: int = 0
-
-
-def _uge_bucket(state, queue_name):
-    state_text = str(state or "").strip().lower()
-    if "e" in state_text or "d" in state_text:
-        return "failed"
-    if "q" in state_text or state_text in {"h", "w"}:
-        return "queued"
-    if str(queue_name or "").strip() or any(marker in state_text for marker in {"r", "s", "t"}):
-        return "running"
-    return "other"
-
-
-def _slurm_bucket(state):
-    state_text = str(state or "").strip().upper().split("+", 1)[0]
-    if state_text in _SLURM_RUNNING:
-        return "running"
-    if state_text in _SLURM_QUEUED:
-        return "queued"
-    if state_text in _SLURM_ERROR:
-        return "failed"
-    return "other"
 
 
 def aggregate_jobs(frame, scheduler):
@@ -161,7 +100,9 @@ def _print_slurm_group_summary(
     if not groups:
         print("jobs  group: unavailable (no Slurm account association was discovered)")
         return False
-    if "account" not in frame.columns:
+    if "account" not in frame.columns or (
+        not frame.empty and frame["account"].fillna("").str.strip().eq("").any()
+    ):
         print("jobs  group: unavailable (squeue output does not contain account data)")
         return False
     for account, members in groups:
