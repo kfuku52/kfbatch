@@ -74,6 +74,10 @@ optional values, or pipe separators to retain empty fields.
 Space values without suffixes are KiB, including in `bytes_*` columns. File counts
 are counts; suffixes k/M/G/T use powers of 1000. Standard tables use their declared
 space/file header scale (`Gbytes` uses 1024 cubed and `kfiles` uses 1000).
+For standard quota tables with one numeric grace value and one empty grace
+field, preserve the original header/row alignment or explicitly write both grace
+fields (use `-` for an empty field). Without that information, the numeric columns
+are ambiguous and the report fails instead of guessing inode counts.
 Zero limits mean unlimited; unavailable or unlimited limits both display as `-`.
 Unknown used-space values cannot form a record. Invalid or misaligned rows may
 be skipped; a successful parse does not validate every input row. No matching

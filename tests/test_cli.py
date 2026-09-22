@@ -147,3 +147,41 @@ def test_unrecognized_successful_lfsq_output_does_not_explain_qlogin():
     assert out.returncode == 1
     assert "completed successfully" in out.stderr
     assert "qlogin" not in out.stderr
+
+
+@pytest.mark.parametrize("aligned", [False, True])
+def test_quota_numeric_grace_cli(tmp_path, aligned):
+    header = ["Filesystem", "blocks", "quota", "limit", "grace", "files", "quota", "limit", "grace"]
+    fields = ["/home", "100", "200", "300", "1234567890", "10", "20", "30", ""]
+    if aligned:
+        header_text = " ".join(f"{value:>14}" for value in header)
+        row_text = " ".join(f"{value:>14}" for value in fields)
+    else:
+        header_text = " ".join(header)
+        row_text = " ".join(fields)
+    fixture = tmp_path / "quota.txt"
+    fixture.write_text(
+        f"Disk quotas for user current_user (uid 1001):\n{header_text}\n{row_text}\n",
+        encoding="utf-8",
+    )
+    result = _run_cli(
+        [
+            "quota",
+            "--provider",
+            "posix",
+            "--quota-example-file",
+            str(fixture),
+            "--current-user",
+            "current_user",
+        ]
+    )
+    if aligned:
+        assert result.returncode == 0
+        assert "10/20/30" in result.stdout
+        assert "1234567890" in result.stdout
+        assert not result.stderr
+    else:
+        assert result.returncode == 1
+        assert "Ambiguous numeric quota grace" in result.stderr
+        assert not result.stdout
+    assert "1,234,567,890/10/20" not in result.stdout

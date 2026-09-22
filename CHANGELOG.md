@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.9] - 2026-09-22
+
+### Fixed
+
+- Preserve inode counts when an aligned quota table has one numeric grace value
+  and one empty grace field, including wrapped filesystem rows. Reject ambiguous
+  unaligned numeric rows with a diagnostic instead of silently shifting columns.
+
 ## [0.4.8] - 2026-09-22
 
 ### Changed

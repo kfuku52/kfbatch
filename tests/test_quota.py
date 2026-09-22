@@ -52,3 +52,57 @@ def test_quota_main_filters_group_owner(capsys):
 def test_quota_main_rejects_empty_filter_result():
     with pytest.raises(KFBatchCommandError, match="No quota records matched"):
         quota_main(_args(scope="group", group_id="missing_group"))
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize(
+    "space_grace,file_grace", [("1234567890", ""), ("", "1234567890"), ("0", ""), ("", "0")]
+)
+def test_numeric_grace_preserves_aligned_inode_columns(wrapped, space_grace, file_grace):
+    def row(fields):
+        return " ".join(f"{field:>14}" for field in fields)
+
+    lines = [
+        "Disk quotas for user user_a (uid 1001):",
+        row(
+            ["Filesystem", "blocks", "quota", "limit", "grace", "files", "quota", "limit", "grace"]
+        ),
+    ]
+    if wrapped:
+        lines.append("/home")
+    lines.append(
+        row(
+            [
+                "" if wrapped else "/home",
+                "100",
+                "200",
+                "300",
+                space_grace,
+                "10",
+                "20",
+                "30",
+                file_grace,
+            ]
+        )
+    )
+    record = parse_quota_lines(lines, "posix")[0]
+    assert record.filesystem == "/home"
+    assert (record.files_used, record.files_soft, record.files_hard) == (10, 20, 30)
+    expected = space_grace or f"space=-,files={file_grace}"
+    assert record.grace == ("" if "0" in (space_grace, file_grace) else expected)
+
+
+@pytest.mark.parametrize(
+    "row", ["/home 100 200 300 1234567890 10 20 30", "/home 100 200 300 10 20 30 1234567890"]
+)
+def test_ambiguous_numeric_grace_fails_instead_of_shifting_counts(row):
+    with pytest.raises(KFBatchCommandError, match="Ambiguous numeric quota grace"):
+        parse_quota_lines(
+            [
+                "Disk quotas for user user_a (uid 1001):",
+                "Filesystem blocks quota limit grace files quota limit grace",
+                "/home 100 200 300 - 10 20 30 -",
+                row,
+            ],
+            "posix",
+        )

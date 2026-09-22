@@ -201,7 +201,27 @@ def _scaled_count(value, factor, *, unlimited_zero=False):
     return None if count is None else count * factor
 
 
-def _standard_quota_values(values):
+def _aligned_quota_values(line, header):
+    """Recover blank cells only when header alignment preserves whole tokens."""
+    ends = [match.end() for match in re.finditer(r"\S+", header)]
+    if len(ends) != 9:
+        return None
+    boundaries = [0, *ends[:-1], max(len(line), ends[-1])]
+    fields = [
+        line[start:end].strip() for start, end in zip(boundaries[:-1], boundaries[1:], strict=True)
+    ]
+    if any(len(field.split()) > 1 for field in fields):
+        return None
+    # Reject a boundary that cut a long count or timestamp into two numbers.
+    if [field for field in fields if field] != line.split():
+        return None
+    values = fields[1:]
+    if not all(values[index] for index in (0, 1, 2, 4, 5, 6)):
+        return None
+    return values
+
+
+def _standard_quota_values(values, *, line="", header=""):
     """Restore optional empty grace fields without shifting inode columns."""
     space, tail = values[:3], values[3:]
     if len(tail) == 3:
@@ -209,7 +229,15 @@ def _standard_quota_values(values):
     if len(tail) == 4:
         if _parse_count(tail[0]) is None:
             return space + tail + [""]
-        return space + [""] + tail
+        if _parse_count(tail[-1]) is None:
+            return space + [""] + tail
+        aligned = _aligned_quota_values(line, header)
+        if aligned is not None:
+            return aligned
+        raise KFBatchCommandError(
+            "Ambiguous numeric quota grace columns; preserve header/row alignment "
+            "or supply both grace fields explicitly (use '-' for an empty field)."
+        )
     if len(tail) == 5:
         return values
     return None
@@ -229,11 +257,13 @@ def _parse_standard_quota(lines, provider):
     section_scope = ""
     section_owner = ""
     saw_header = False
+    header_line = ""
     pending_filesystem = ""
     space_factor = 1024
     file_factor = 1
     for raw_line in lines:
-        line = str(raw_line).strip()
+        aligned_line = str(raw_line).expandtabs().rstrip("\r\n")
+        line = aligned_line.strip()
         match = _SECTION_RE.match(line)
         if match is not None:
             section_scope = "self" if match.group("kind").lower() in {"usr", "user"} else "group"
@@ -246,6 +276,7 @@ def _parse_standard_quota(lines, provider):
         header_factors = _quota_header_factors(line)
         if header_factors is not None:
             space_factor, file_factor = header_factors
+            header_line = aligned_line
             saw_header = True
             continue
         if not saw_header:
@@ -260,7 +291,7 @@ def _parse_standard_quota(lines, provider):
         if len(items) < 7:
             continue
         filesystem = items[0]
-        values = _standard_quota_values(items[1:])
+        values = _standard_quota_values(items[1:], line=aligned_line, header=header_line)
         if values is None:
             continue
         bytes_used = _parse_bytes(values[0], default_factor=space_factor)
