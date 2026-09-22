@@ -27,7 +27,13 @@ Large scheduler reports are parsed with bounded memory use.
 
 ## Installation
 
-Python 3.10 or newer is required.
+Python 3.10 or newer is required; CI covers Python 3.10–3.14. pip installs the
+runtime dependency `pandas>=2.2.2`. The Git URL installation also requires Git.
+Use a virtual environment if your system Python disallows package installation.
+
+Run live queries on a POSIX cluster host with the relevant scheduler/quota clients
+on `PATH` and access to their data. pip does not install these external tools;
+standard quota auto-detection expects Linux `quota -w -p -ug` support.
 
 ```bash
 python -m pip install "git+https://github.com/kfuku52/kfbatch"
@@ -103,15 +109,22 @@ kfbatch batch --scope all
 For Slurm, group identity is an account association reported by `sshare`; jobs are
 selected by the account field from `squeue`. For AGE/UGE, `qfree` supplies the group
 name and member list. If those sources are unavailable, kfbatch labels the group
-view unavailable instead of guessing from currently visible jobs. An administrator
-or remote-wrapper user can select a known identity explicitly:
+view unavailable instead of guessing from currently visible jobs. For Slurm, an
+administrator or remote-wrapper user can select a known account explicitly:
 
 ```bash
 kfbatch batch --scope group --group-id account_a
 ```
 
 When a user has several Slurm account associations, each account is reported
-separately.
+separately. For AGE/UGE, `--group-id` cannot replace missing `qfree` membership
+data; it must agree with the discovered group. With only a qfree running total,
+queued and failed group slots are shown as `?`.
+
+Slurm totals count array tasks, whereas AGE/UGE totals count slots (slots per task
+multiplied by array-task count). These are current snapshots, not job history.
+`--scope` and `--by-user` affect printed job summaries, not the resource table or
+TSV rows.
 
 ## Disk quota
 
@@ -119,9 +132,9 @@ separately.
 usage from limits shared by a group:
 
 ```text
-scope  owner    filesystem    space(used/soft/hard)   files(used/soft/hard)  grace
-self   user_a   home_user_a   3.5TiB/-/5.0TiB         420,000/-/500,000      -
-group  group_a  home_group_a  71.2TiB/90.0TiB/100TiB  8,200,000/...          3days
+scope  owner    filesystem    space(used/soft/hard)   files(used/soft/hard)  grace  provider
+self   user_a   home_user_a   3.5TiB/-/5.0TiB         420,000/-/500,000      -      custom
+group  group_a  home_group_a  71.2TiB/90.0TiB/100TiB  8,200,000/...          3days  custom
 ```
 
 Common forms are:
@@ -153,12 +166,15 @@ uses nonzero status to report exceeded limits. A custom site wrapper can
 emit a whitespace-, tab-, or pipe-separated table whose required columns are
 `scope owner filesystem bytes_used`; optional columns are `bytes_soft`,
 `bytes_hard`, `files_used`, `files_soft`, `files_hard`, and `grace`. Unitless space
-values are KiB; binary suffixes from KiB through PiB are supported.
+values are KiB; binary suffixes from KiB through PiB are supported. Despite the
+`bytes_*` column names, unitless wrapper values are also KiB, not bytes. See the
+[usage reference](docs/usage-reference.md) for missing values, filters, and safe
+offline examples.
 
 ## Output
 
 Slurm uses one row per partition and reports task totals as running, queued,
-terminal/error, and other recognized states (`R/Q/X/O`):
+terminal/error, and other/unknown states (`R/Q/X/O`):
 
 ```text
 jobs  self:R/Q/X/O=0/0/0/0  all:R/Q/X/O=4/2/0/0
@@ -177,7 +193,8 @@ legend: nodes=working/abnormal/total, cpu=available/used/total, ram=available/to
 user has multiple associations and no queued job identifies one unambiguously,
 the output explicitly says that the highest-FairShare association was selected.
 
-AGE/UGE/SGE uses the same compact layout and adds `qfree` quota data when available:
+AGE/UGE/SGE uses the same compact layout with slot totals (`R/Q/F`) and adds
+`qfree` quota data when available:
 
 ```text
 jobs  self:R/Q/F=0/0/0  all:R/Q/F=4/248/5
@@ -203,20 +220,25 @@ available memory is floored so the display never rounds launch capacity upward.
 # Merge three Grid Engine snapshots using the minimum trustworthy availability.
 kfbatch batch --stat_command "qstat -F" --niter 3
 
-# Show two best nodes for CPU and RAM; include ties at the second tier.
+# Show two best nodes for CPU and RAM; include ties with the second node.
 kfbatch batch --ntop 2 --all_tiers yes
 
-# Limit each scheduler command to 15 seconds. Zero disables timeouts.
+# Limit each scheduler command to 15 seconds (default: 60).
 kfbatch batch --command_timeout 15
 
-# Keep the compact Slurm table but omit priority-derived launch details.
+# Keep the compact Slurm table but display "-" for launch and skip sprio.
 kfbatch batch --show_launch_heuristic no
 
 # Omit the Slurm association FairShare line.
 kfbatch batch --show_fairshare_rank no
 ```
 
-Run entirely from the repository's synthetic fixtures:
+`--command_timeout 0` disables individual command timeouts; Grid Engine resource
+sampling still has a 300-second budget. `--niter` accepts 1–100 and applies only
+to Grid Engine resource snapshots. Other commands are not repeated.
+
+Run entirely from the repository root using its synthetic fixtures (these paths
+are not installed by the wheel):
 
 ```bash
 kfbatch batch \
@@ -238,9 +260,17 @@ Node and job tables have separate output paths:
 kfbatch --out_nodes nodes.tsv --out_jobs jobs.tsv
 ```
 
-Writes are atomic and both paths must resolve to different files. `--out` remains a
-legacy alias of `--out_nodes`. If Slurm node discovery fails, the job TSV can still
-be written, the node TSV is not created, and the command returns a non-zero status.
+Each file is written atomically; the pair is not a transaction. Both paths must
+resolve to different files. `--out` remains a legacy alias of `--out_nodes`. If Slurm node discovery fails, the job TSV can still
+be written, the node TSV is not created or updated, and the command returns a
+non-zero status. Existing outputs are replaced on successful writes, not appended;
+parent directories must already exist. No files are saved unless output paths
+are supplied. Relative paths use the current working directory.
+
+See [TSV columns and units](docs/usage-reference.md#tsv-columns-and-units) before
+interpreting the files: node rows are queue/partition instances, memory is in GiB,
+and job `total_slots` has scheduler-specific semantics. Diagnostic notes and
+parse-quality metadata are not included in TSVs.
 
 ## Accuracy and failure behavior
 

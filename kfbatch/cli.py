@@ -160,7 +160,7 @@ def _build_parser(*, prog="kfbatch", add_help=True):
         metavar="[yes,no]",
         default="no",
         type=parse_bool,
-        help='default=%(default)s: Include nodes tied with the "ntop" resource tier.',
+        help='default=%(default)s: Include nodes tied in the primary resource with the "ntop" node.',
     )
     parser.add_argument(
         "--niter",
@@ -216,7 +216,7 @@ def _build_parser(*, prog="kfbatch", add_help=True):
         metavar="SECONDS",
         default=60.0,
         type=parse_nonnegative_float,
-        help="default=%(default)s: Scheduler command timeout; 0 disables it.",
+        help="default=%(default)s: Scheduler command timeout; 0 disables it (Grid Engine sampling still has a 300s budget).",
     )
     parser.add_argument(
         "--exclude_abnormal_node",
@@ -256,7 +256,7 @@ def _build_parser(*, prog="kfbatch", add_help=True):
         default="",
         help=(
             "default=auto: Slurm account or AGE/UGE group to summarize. "
-            "Use this when automatic group discovery is unavailable."
+            "Overrides Slurm account discovery; AGE/UGE still requires qfree group data."
         ),
     )
     parser.add_argument(
