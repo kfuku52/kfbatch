@@ -340,3 +340,83 @@ def test_uge_json_rejected_job_is_not_a_complete_total(monkeypatch):
     )
     assert frame is fallback
     assert not all_users
+
+
+@pytest.mark.parametrize(
+    "group_slots,expected", [([None], "?"), ([3, None], "?"), ([0], "0"), ([3, 2], "5")]
+)
+def test_uge_group_running_total_preserves_unknown_queues(group_slots, expected, capsys):
+    qfree = pandas.DataFrame({"group_slots": group_slots})
+    qfree.attrs["group_name"] = "group_a"
+    jobs = stat.get_user_df([])
+    assert print_group_job_summary(
+        jobs, scheduler="uge", current_user="current_user", qfree_frame=qfree
+    )
+    assert f"group[group_a]:R/Q/F={expected}/?/?" in capsys.readouterr().out
+
+
+def test_uge_explicit_group_requires_discovered_identity(capsys):
+    qfree = pandas.DataFrame({"group_slots": [3]})
+    qfree.attrs["group_users"] = ["current_user"]
+    jobs = stat.get_user_df([])
+    jobs.attrs["all_users"] = True
+    assert not print_group_job_summary(
+        jobs,
+        scheduler="uge",
+        current_user="current_user",
+        group_id="group_a",
+        qfree_frame=qfree,
+    )
+    assert "unavailable" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("allow_failure", [False, True])
+@pytest.mark.parametrize("example", [False, True])
+def test_command_line_limit_respects_optional_failure(
+    monkeypatch, tmp_path, allow_failure, example
+):
+    import kfbatch.command as command_module
+
+    monkeypatch.setattr(command_module, "MAX_OUTPUT_LINE_BYTES", 8)
+    fixture = tmp_path / "output.txt"
+    fixture.write_text("x" * 9 + "\n")
+    command = shlex.join([sys.executable, "-c", "print('x' * 9)"])
+    kwargs = {"allow_failure": allow_failure, "example_file": str(fixture) if example else ""}
+    if allow_failure:
+        assert get_command_result(command, **kwargs) is None
+    else:
+        with pytest.raises(KFBatchCommandError) as caught:
+            get_command_result(command, **kwargs)
+        assert caught.value.output_limited
+
+
+@pytest.mark.parametrize("header,factor", [("kfiles", 1000), ("mfiles", 1000000)])
+def test_quota_fractional_scaled_file_counts(header, factor):
+    records = parse_quota_lines(
+        [
+            "Disk quotas for user current_user (uid 1000):",
+            f"Filesystem Gbytes quota limit grace {header} quota limit grace",
+            "/home 1 2 3 - 0.5 1.25 2.75 -",
+        ],
+        provider="lfsq",
+    )
+    assert len(records) == 1
+    assert (records[0].files_used, records[0].files_soft, records[0].files_hard) == (
+        factor // 2,
+        factor * 5 // 4,
+        factor * 11 // 4,
+    )
+
+
+def test_uge_memory_only_qfree_does_not_imply_zero_running_jobs(capsys):
+    qfree = stat.get_qfree_df(
+        [
+            "SUMMARY OF RUNNING JOBS ( MEM_REQ )",
+            "mjobs.q 8 16 - 128 24 16 512",
+            "THE NUMBER OF MEM_REQ BY USER IN THE GROUP (group_a)",
+        ]
+    )
+    assert print_group_job_summary(
+        stat.get_user_df([]), scheduler="uge", current_user="current_user", qfree_frame=qfree
+    )
+    assert "group[group_a]:R/Q/F=?/?/?" in capsys.readouterr().out

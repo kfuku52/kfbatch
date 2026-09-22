@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.11] - 2026-09-22
+
+### Fixed
+
+- Preserve fractional file counts until after quota header scaling (for example,
+  `0.5 kfiles` now reports 500 files instead of zero).
+- Keep Grid Engine group running totals unknown when any qfree queue lacks slot
+  data, and require a discovered group identity even with an explicit group ID.
+- Treat oversized output lines from optional commands as degraded data, matching
+  fixture-file and other command-limit failures instead of aborting the report.
+
 ## [0.4.10] - 2026-09-22
 
 ### Changed

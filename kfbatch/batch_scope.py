@@ -118,9 +118,9 @@ def _qfree_group_context(qfree_frame, explicit_group):
         return "", []
     discovered = str(qfree_frame.attrs.get("group_name", "") or "")
     users = [str(user) for user in qfree_frame.attrs.get("group_users", []) if str(user)]
-    if explicit_group and discovered and explicit_group != discovered:
+    if not discovered or (explicit_group and explicit_group != discovered):
         return "", []
-    return explicit_group or discovered, users
+    return discovered, users
 
 
 def _print_uge_group_summary(frame, qfree_frame, explicit_group, by_user):
@@ -133,7 +133,8 @@ def _print_uge_group_summary(frame, qfree_frame, explicit_group, by_user):
             _print_user_breakdown(group_frame, "uge", members)
         return True
     if group_name and qfree_frame is not None and qfree_frame.shape[0] > 0:
-        running = int(qfree_frame["group_slots"].fillna(0).sum())
+        slots = qfree_frame["group_slots"]
+        running = str(int(slots.sum())) if slots.notna().all() else "?"
         print(f"jobs  group[{group_name}]:R/Q/F={running}/?/?  (qfree running total only)")
         return True
     if not has_all_users:

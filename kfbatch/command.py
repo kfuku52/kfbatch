@@ -341,7 +341,12 @@ def _command_result_lines(
             argv=command,
             returncode=returncode,
         )
-    return _decode_bounded_lines(stdout, command_name)
+    try:
+        return _decode_bounded_lines(stdout, command_name)
+    except KFBatchCommandError:
+        if allow_failure:
+            return None
+        raise
 
 
 def get_command_result(

@@ -174,7 +174,7 @@ def _parse_bytes(value, *, unlimited_zero=False, default_factor=1024):
     return int(Decimal(match.group(1)) * factor)
 
 
-def _parse_count(value, *, unlimited_zero=False):
+def _parse_count(value, *, unlimited_zero=False, default_factor=1):
     text = _clean_numeric_token(value).replace(",", "")
     if text.lower() in _UNLIMITED and (unlimited_zero or text != "0"):
         return None
@@ -182,7 +182,7 @@ def _parse_count(value, *, unlimited_zero=False):
     if match is None:
         return None
     factor = {"": 1, "k": 1000, "m": 1000**2, "g": 1000**3, "t": 1000**4}[match.group(2).lower()]
-    return int(Decimal(match.group(1)) * factor)
+    return int(Decimal(match.group(1)) * factor * default_factor)
 
 
 def _quota_header_factors(line):
@@ -197,8 +197,7 @@ def _quota_header_factors(line):
 
 
 def _scaled_count(value, factor, *, unlimited_zero=False):
-    count = _parse_count(value, unlimited_zero=unlimited_zero)
-    return None if count is None else count * factor
+    return _parse_count(value, unlimited_zero=unlimited_zero, default_factor=factor)
 
 
 def _aligned_quota_values(line, header):
