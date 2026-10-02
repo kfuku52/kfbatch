@@ -1,5 +1,6 @@
 import os
 import shlex
+import signal
 import sys
 import time
 from types import SimpleNamespace
@@ -151,6 +152,46 @@ def test_get_command_stdout_lines_kills_descendants_on_timeout(tmp_path):
     assert captured.value.timed_out is True
     time.sleep(0.5)
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("group_exists", [False, True])
+def test_cleanup_reaps_exited_leader_and_still_signals_descendants(monkeypatch, group_exists):
+    signals = []
+
+    class ExitedProcess:
+        pid = 12345
+
+        def wait(self, timeout):
+            return 0
+
+    def signal_group(pid, sig):
+        signals.append((pid, sig))
+        if len(signals) == 1:
+            raise PermissionError("exited leader")
+        if not group_exists:
+            raise ProcessLookupError("group no longer exists")
+
+    monkeypatch.setattr(command_module.os, "killpg", signal_group)
+    command_module._signal_process_group(ExitedProcess(), signal.SIGTERM)
+    assert signals == [(12345, signal.SIGTERM), (12345, signal.SIGTERM)]
+
+
+@pytest.mark.parametrize("leader_running", [False, True])
+def test_cleanup_does_not_hide_permission_failures(monkeypatch, leader_running):
+    class Process:
+        pid = 12345
+
+        def wait(self, timeout):
+            if leader_running:
+                raise command_module.subprocess.TimeoutExpired("fixture", timeout)
+            return 0
+
+    def denied_signal(*_):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(command_module.os, "killpg", denied_signal)
+    with pytest.raises(PermissionError, match="access denied"):
+        command_module._signal_process_group(Process(), signal.SIGTERM)
 
 
 @pytest.mark.parametrize("timeout", [-1, float("nan"), float("inf"), "invalid"])
@@ -435,8 +476,9 @@ def test_get_scontrol_reservation_df_parses_multiline_hostlists_and_access():
     ]
     df = get_scontrol_reservation_df(lines, current_user="current_user")
     assert df["node_name"].tolist() == ["node01", "node02"]
-    assert df["reserved_cores"].tolist() == [8, 8]
-    assert df["reserved_mem_mb"].tolist() == [16384, 16384]
+    assert df["whole_node"].tolist() == [True, True]
+    assert df["reserved_cores"].tolist() == [0, 0]
+    assert df["reserved_mem_mb"].tolist() == [0, 0]
     assert df["accessible"].tolist() == [True, True]
 
 
@@ -452,7 +494,7 @@ def test_get_scontrol_reservation_df_expands_compound_hostlists():
         "rack2n01",
         "rack2n02",
     ]
-    assert df["reserved_cores"].tolist() == [2, 2, 2, 2]
+    assert df["whole_node"].all()
 
 
 def test_reservation_access_requires_every_configured_dimension():

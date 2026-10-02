@@ -391,6 +391,7 @@ def _explicit_reservation_rows(block, context):
             rejected_nodes.append("<unknown>")
             continue
         reserved_cores = _count_core_id_expression(params.get("CoreIDs", ""))
+        whole_node = reserved_cores == 0
         if reserved_cores == 0 and context["node_count"] == 1:
             reserved_cores = context["default_reserved_cores"]
         if reserved_cores <= 0:
@@ -405,7 +406,7 @@ def _explicit_reservation_rows(block, context):
                 node_name,
                 reserved_cores,
                 reserved_mem_mb,
-                whole_node=False,
+                whole_node=whole_node,
             )
         )
     return rows, bool(explicit_lines), rejected_nodes
@@ -413,29 +414,24 @@ def _explicit_reservation_rows(block, context):
 
 def _hostlist_reservation_rows(header_params, context):
     node_names = _expand_slurm_hostlist(header_params.get("Nodes", "").strip())
-    if not node_names:
-        return []
-    node_count = context["node_count"] or len(node_names)
-    rows = []
-    for node_index, node_name in enumerate(node_names):
-        reserved_cores = 0
-        if context["default_reserved_cores"] > 0 and node_count > 0:
-            reserved_cores = context["default_reserved_cores"] // node_count
-            if node_index < context["default_reserved_cores"] % node_count:
-                reserved_cores += 1
-        reserved_mem_mb = 0
-        if context["default_reserved_mem_mb"] > 0 and node_count > 0:
-            reserved_mem_mb = int(round(context["default_reserved_mem_mb"] / node_count))
-        rows.append(
-            _reservation_row(
-                context,
-                node_name,
-                reserved_cores,
-                reserved_mem_mb,
-                whole_node=context["default_reserved_cores"] <= 0,
-            )
-        )
-    return rows
+    # Slurm omits per-node CoreIDs for whole-node reservations. Aggregate
+    # CoreCnt cannot be divided safely over heterogeneous nodes. A wrapper that
+    # omits partial-reservation details must also leave these nodes unavailable.
+    return [_reservation_row(context, node_name, 0, 0, whole_node=True) for node_name in node_names]
+
+
+def _reservation_has_no_compute_resources(header_params):
+    flags = set(str(header_params.get("Flags", "")).upper().split(","))
+    nodes = str(header_params.get("Nodes", "")).strip()
+    node_count, cores, memory = _reservation_resource_defaults(header_params)
+    return (
+        bool(flags & {"LICENSE_ONLY", "ANY_NODES"})
+        and nodes in {"", "(null)", "N/A"}
+        and _strict_nonnegative_int(header_params.get("NodeCnt", "")) == 0
+        and node_count == 0
+        and cores == 0
+        and memory == 0
+    )
 
 
 def _parse_reservation_block(block, current_user, current_accounts, current_groups):
@@ -448,6 +444,8 @@ def _parse_reservation_block(block, current_user, current_accounts, current_grou
         )
         return [], warning
     if state != "ACTIVE":
+        return [], None
+    if _reservation_has_no_compute_resources(header_params):
         return [], None
     partition_name = header_params.get("PartitionName", "").strip()
     if partition_name in {"(null)", "N/A"}:
@@ -497,7 +495,10 @@ def get_scontrol_reservation_df(
     rows = []
     warnings = []
     unresolved_partitions = set()
-    for block in _iter_scontrol_named_blocks(lines, "ReservationName="):
+    reservation_lines = (
+        line for line in lines if str(line).strip() != "No reservations in the system"
+    )
+    for block in _iter_scontrol_named_blocks(reservation_lines, "ReservationName="):
         header_params = _reservation_header_params(block)
         block_rows, warning = _parse_reservation_block(
             block,
@@ -556,6 +557,33 @@ def _expand_reservation_rows(df_node, df_reservation):
     return expanded
 
 
+def _reservation_cpu_counts(reservation_rows, node_metadata):
+    """Convert physical reservation cores to the node table's Slurm CPU units."""
+    whole_node = (
+        reservation_rows.get("whole_node", pandas.Series(False, index=reservation_rows.index))
+        .fillna(False)
+        .astype(bool)
+    )
+    topology = node_metadata.get("slurm_cpus_per_core")
+    # Legacy caller-created frames already express reservations in their CPU
+    # units. Parsed scontrol frames explicitly retain unknown topology instead.
+    factors = (
+        pandas.to_numeric(reservation_rows["node_name"].map(topology), errors="coerce")
+        if topology is not None
+        else pandas.Series(1, index=reservation_rows.index)
+    )
+    unknown = ~whole_node & factors.isna()
+    reservation_rows["reserved_cores_effective"] = (
+        pandas.to_numeric(reservation_rows["reserved_cores"], errors="coerce").fillna(0)
+        * factors.fillna(1)
+    ).astype(int)
+    whole_node |= unknown
+    reservation_rows.loc[whole_node, "reserved_cores_effective"] = (
+        reservation_rows.loc[whole_node, "ncore_total"].fillna(0).astype(int)
+    )
+    return whole_node, reservation_rows.loc[unknown, "node_name"].unique().tolist()
+
+
 def apply_slurm_reservations(df_node, df_reservation):
     if (
         df_node is None
@@ -607,20 +635,7 @@ def apply_slurm_reservations(df_node, df_reservation):
         pandas.to_numeric(node_shape["ncore_total"], errors="coerce").fillna(0).astype(int)
     )
     reservation_rows = reservation_rows.merge(node_shape, how="left", on="node_name")
-    reservation_rows["reserved_cores_effective"] = (
-        pandas.to_numeric(reservation_rows["reserved_cores"], errors="coerce").fillna(0).astype(int)
-    )
-    whole_node = (
-        reservation_rows.get(
-            "whole_node",
-            pandas.Series(False, index=reservation_rows.index),
-        )
-        .fillna(False)
-        .astype(bool)
-    )
-    reservation_rows.loc[whole_node, "reserved_cores_effective"] = (
-        reservation_rows.loc[whole_node, "ncore_total"].fillna(0).astype(int)
-    )
+    whole_node, unknown_topology = _reservation_cpu_counts(reservation_rows, df_node.attrs)
     reserved_mem_mb = reservation_rows.get(
         "reserved_mem_mb",
         pandas.Series(0, index=reservation_rows.index),
@@ -695,8 +710,10 @@ def apply_slurm_reservations(df_node, df_reservation):
             .astype(str)
             .map(lambda value: "|".join(token for token in [value, "reserved"] if token))
         )
+    df.attrs.update(df_node.attrs)
     df.attrs["reservation_unresolved_targets"] = unresolved_targets
     df.attrs["reservation_unresolved_partitions"] = unresolved_partitions
+    df.attrs["reservation_unknown_topology_nodes"] = unknown_topology
     df.attrs["slurm_reservations_applied"] = True
     return df
 
@@ -1552,11 +1569,12 @@ def _get_uge_all_user_jobs(args, fallback, timeout_seconds):
             return fallback, False
         return parsed, True
     parsed = get_uge_json_job_df(job_lines)
-    if parsed is not None and not rejected_rows(parsed):
+    if parsed is not None and not rejected_rows(parsed) and not parsed.attrs.get("missing_fields"):
         return parsed, True
     _print_degraded(
         "AGE/UGE/SGE all-user jobs",
-        "JSON schema was not recognized or rows were rejected; using jobs embedded in qstat -F",
+        "JSON schema was not recognized, rows were rejected, or required fields were missing; "
+        "using jobs embedded in qstat -F",
     )
     return fallback, False
 
@@ -1774,6 +1792,11 @@ def _apply_slurm_reservation_state(df, df_user, args, timeout_seconds):
         _print_degraded("Slurm reservation", warning)
     if df_reservation.shape[0] > 0:
         df = apply_slurm_reservations(df, df_reservation)
+        for node in df.attrs.get("reservation_unknown_topology_nodes", []):
+            _print_degraded(
+                "Slurm reservation",
+                f"CPU topology is unknown for {node}; the node's resource ceiling is suppressed",
+            )
         for target in df.attrs.get("reservation_unresolved_targets", []):
             _print_degraded(
                 "Slurm reservation",

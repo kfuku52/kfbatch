@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.12] - 2026-10-02
+
+### Fixed
+
+- Apply whole-node Slurm reservations using each node's capacity rather than
+  distributing aggregate core counts over heterogeneous nodes.
+- Convert partial reservation core counts to Slurm CPU units using node topology;
+  suppress affected resource ceilings when parsed topology is unknown.
+- Recognize Slurm's normal no-reservations response and reservations of only
+  licenses or burst buffers without suppressing unrelated CPU/RAM capacity.
+- Reject Grid Engine JSON jobs with missing or invalid required count, owner,
+  or state fields and label their all-user results degraded.
+- Bound output-capture cleanup when detached descendants retain inherited pipes;
+  report incomplete capture instead of hanging or returning a partial success.
+- Wait for exiting process-group leaders before retrying macOS cleanup signals so an
+  output-limit/exit race retains the correct failure diagnostic.
+
 ## [0.4.11] - 2026-09-22
 
 ### Fixed

@@ -290,13 +290,18 @@ parse-quality metadata are not included in TSVs.
 - Active Slurm reservations inaccessible to the current user are subtracted across
   every partition alias of the physical node. Access checks combine configured
   user, group, account, QOS, and partition restrictions. Unresolved or unavailable
-  reservation metadata suppresses resource ceilings.
+  reservation metadata suppresses resource ceilings. Whole-node reservations use
+  each node's capacity; partial reservations convert cores to Slurm CPU units.
+  Unknown topology suppresses partial-reservation ceilings. Normal empty responses
+  and license/burst-buffer-only reservations do not remove CPU/RAM capacity.
 - Slurm `launch` is only a single-node CPU/RAM ceiling. It is not an immediate-start
   prediction and does not model every scheduling constraint.
 - Required job/resource command failures return non-zero. Optional command failures
   print a `note: degraded ...` explanation.
 - Scheduler commands have bounded stdout, stderr, individual line lengths, and
-  execution time. Timeout cleanup includes descendant processes.
+  execution time. Timeout cleanup terminates the command's process group. Output
+  capture remains bounded when a detached child retains its pipes; see the
+  [wrapper limitations](docs/usage-reference.md#commands-defaults-and-precedence).
 - Scheduler output is decoded defensively, so invalid UTF-8 in a job name does not
   crash the report.
 

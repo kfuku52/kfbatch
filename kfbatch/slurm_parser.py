@@ -516,6 +516,22 @@ def _slurm_node_capacity(params):
     }
 
 
+def _slurm_node_cpus_per_core(params):
+    """Resolve Slurm CPU units without exporting topology as new TSV columns."""
+    threads = _strict_nonnegative_int(params.get("ThreadsPerCore", ""))
+    if not threads:
+        return None
+    sockets = _strict_nonnegative_int(params.get("Sockets", ""))
+    cores = _strict_nonnegative_int(params.get("CoresPerSocket", ""))
+    cpus = _strict_nonnegative_int(params.get("CPUTot", ""))
+    if sockets and cores and cpus:
+        physical_cores = sockets * cores
+        factor, remainder = divmod(cpus, physical_cores)
+        return factor if not remainder and 1 <= factor <= threads else None
+    # ThreadsPerCore is a conservative upper bound when full topology is absent.
+    return threads
+
+
 def _slurm_node_status(slurm_state, metadata_status):
     state_base = _normalize_slurm_node_state(slurm_state)
     flags = _slurm_state_flags(slurm_state)
@@ -540,6 +556,7 @@ def _slurm_node_status(slurm_state, metadata_status):
 
 def get_scontrol_node_df(lines, partition_state_map=None):
     rows = []
+    cpus_per_core = {}
     for node_block in _iter_scontrol_node_blocks(lines):
         if "NodeName=" not in node_block:
             continue
@@ -552,6 +569,7 @@ def get_scontrol_node_df(lines, partition_state_map=None):
         partitions = [p for p in partitions if p not in ["(null)", "N/A"]]
         if len(partitions) == 0:
             continue
+        cpus_per_core[node_name] = _slurm_node_cpus_per_core(params)
         capacity = _slurm_node_capacity(params)
         ncore_total = capacity["ncore_total"]
         ncore_used = capacity["ncore_used"]
@@ -607,6 +625,7 @@ def get_scontrol_node_df(lines, partition_state_map=None):
                 )
             )
     df = pandas.DataFrame.from_records(rows, columns=SLURM_NODE_COLUMNS)
+    df.attrs["slurm_cpus_per_core"] = cpus_per_core
     if df.shape[0] == 0:
         return df
     df = df.sort_values(by=["queue_name", "node_name"]).reset_index(drop=True)

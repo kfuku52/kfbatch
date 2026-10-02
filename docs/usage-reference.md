@@ -58,6 +58,13 @@ full tab-separated format and remove `SQUEUE_*` environment variables; wrappers
 must arrange their own output format. Direct `quota`, `lfs`, and `lfsq` calls set
 `LC_ALL=C`; other environment variables are inherited.
 
+Wrappers should keep descendants in the command's process group so timeout
+cleanup can terminate them. A child that starts a new session or process group
+cannot reliably be terminated by that cleanup. If it keeps stdout/stderr pipes
+open, kfbatch stops capture after a bounded cleanup period and reports a timeout
+or incomplete-output error. Such a child may continue running independently;
+the wrapper must manage its lifecycle or avoid detaching it.
+
 Grid Engine resource snapshots are read consecutively without a polling delay.
 With a fixture, `--niter` rereads that same file. There is no persistent cache or
 resume state. A new invocation performs new reads/queries.
@@ -108,7 +115,9 @@ of the compact display. `--scope`, `--group-id`, and `--by-user` do not filter t
 Other node fields include `qtype`, `np_load`, and `arch`; Slurm also includes
 `slurm_state` and `reservation_name`. Reservation processing can add
 `reservation_cores`, `reservation_mem_mb` (MiB), and `reservation_accessible`.
-These describe reservation adjustments/access, not job requests. Grid Engine qfree quota/launch values are
+`reservation_cores` uses Slurm CPU units, matching `ncore_resv`, including hardware
+threads when configured as CPUs. These describe reservation adjustments/access,
+not job requests. Grid Engine qfree quota/launch values are
 console-only and do not appear in the node TSV. The console can use qfree RAM
 totals, while the TSV retains queue-instance memory from qstat.
 
