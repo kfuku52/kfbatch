@@ -1,6 +1,10 @@
 """Synthetic regressions and invariants for the correctness audit."""
 
+import json
+import os
 import shlex
+import signal
+import subprocess
 import sys
 from argparse import Namespace
 from dataclasses import astuple
@@ -126,6 +130,206 @@ def test_zero_effective_cpus_is_not_missing():
     )
     assert frame["ncore_total"].tolist() == [0]
     assert frame["ncore_available"].tolist() == [0]
+
+
+def test_whole_node_reservation_covers_heterogeneous_nodes_and_partition_aliases():
+    nodes = stat.get_scontrol_node_df(
+        [
+            "NodeName=node01 Partitions=main,short CPUTot=8 CPUAlloc=0 "
+            "RealMemory=16384 AllocMem=0 State=IDLE+RESERVED ReservationName=hold",
+            "NodeName=node02 Partitions=main,short CPUTot=32 CPUAlloc=0 "
+            "RealMemory=65536 AllocMem=0 State=IDLE+RESERVED ReservationName=hold",
+        ],
+        {"main": "UP", "short": "UP"},
+    )
+    reservations = stat.get_scontrol_reservation_df(
+        [
+            "ReservationName=hold Nodes=node[01-02] NodeCnt=2 CoreCnt=40 "
+            "PartitionName=main TRES=cpu=40 Users=other_user State=ACTIVE"
+        ],
+        current_user="current_user",
+    )
+    result = stat.adjust_ram_unit(stat.apply_slurm_reservations(nodes, reservations))
+    assert result["ncore_available"].eq(0).all()
+    assert result["hc:mem_req"].eq(0).all()
+    launch = stat.get_slurm_launch_heuristic_df(result, stat.get_squeue_user_df([]))
+    assert launch["recommended_cores"].eq(0).all()
+
+
+@pytest.mark.parametrize(
+    "topology,expected",
+    [
+        ("Sockets=1 CoresPerSocket=16 ThreadsPerCore=2", 16),
+        ("ThreadsPerCore=2", 16),
+        ("Sockets=1 CoresPerSocket=32 ThreadsPerCore=2", 24),
+        ("ThreadsPerCore=1", 24),
+        ("", 0),
+        ("ThreadsPerCore=invalid", 0),
+    ],
+)
+def test_partial_reservation_uses_node_cpu_units(topology, expected, monkeypatch, capsys):
+    nodes = stat.get_scontrol_node_df(
+        [
+            f"NodeName=node01 Partitions=main,short CPUTot=32 CPUAlloc=0 {topology} "
+            "RealMemory=65536 AllocMem=0 State=IDLE"
+        ],
+        {"main": "UP", "short": "UP"},
+    )
+    reservations = stat.get_scontrol_reservation_df(
+        [
+            "ReservationName=hold Nodes=node01 NodeCnt=1 CoreCnt=8 "
+            "PartitionName=main Users=other_user State=ACTIVE",
+            "NodeName=node01 CoreIDs=0-7",
+        ],
+        current_user="current_user",
+    )
+    result = stat.apply_slurm_reservations(nodes, reservations)
+    assert result["ncore_available"].tolist() == [expected, expected]
+    assert set(result.columns) == set(stat.SLURM_NODE_COLUMNS) | {
+        "reservation_cores",
+        "reservation_mem_mb",
+        "reservation_accessible",
+    }
+    monkeypatch.setattr(stat, "get_scontrol_reservation_df", lambda *_, **__: reservations)
+    monkeypatch.setattr(stat, "get_command_stdout_lines", lambda **_: [])
+    args = _build_parser().parse_args(["--current_user", "current_user"])
+    cli_result = stat._apply_slurm_reservation_state(nodes, stat.get_squeue_user_df([]), args, 1)
+    assert cli_result["ncore_available"].tolist() == [expected, expected]
+    assert ("CPU topology is unknown" in capsys.readouterr().out) is (expected == 0)
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["No reservations in the system"],
+        ["  No reservations in the system  "],
+        [
+            "ReservationName=license_hold Nodes= NodeCnt=0 CoreCnt=0 "
+            "PartitionName=(null) Flags=LICENSE_ONLY TRES=license/tool_a=1 "
+            "Users=other_user Licenses=tool_a State=ACTIVE"
+        ],
+        [
+            "ReservationName=license_hold Nodes=(null) NodeCnt=0 CoreCnt=0 "
+            "PartitionName=(null) Flags=ANY_NODES TRES=license/tool_a=1 "
+            "Users=other_user Licenses=tool_a State=ACTIVE"
+        ],
+        [
+            "ReservationName=buffer_hold Nodes=(null) NodeCnt=0 CoreCnt=0 "
+            "PartitionName=(null) Flags=ANY_NODES TRES=bb/tool_a=1 "
+            "Users=other_user BurstBuffer=tool_a:1 State=ACTIVE"
+        ],
+    ],
+)
+def test_reservation_responses_without_compute_resources_preserve_capacity(
+    lines, monkeypatch, capsys
+):
+    args = _build_parser().parse_args(["--current_user", "current_user"])
+    monkeypatch.setattr(stat, "get_command_stdout_lines", lambda **_: lines)
+    result = stat._apply_slurm_reservation_state(
+        _node_frame(), stat.get_squeue_user_df([]), args, 1
+    )
+    assert result["ncore_available"].tolist() == [32, 32]
+    assert result["hc:mem_req"].tolist() == ["65536M", "65536M"]
+    assert "degraded" not in capsys.readouterr().out
+
+
+def test_license_flag_does_not_hide_a_compute_reservation(monkeypatch):
+    lines = [
+        "ReservationName=hold Nodes=node01 NodeCnt=1 CoreCnt=32 "
+        "PartitionName=main Flags=LICENSE_ONLY Users=other_user State=ACTIVE"
+    ]
+    args = _build_parser().parse_args(["--current_user", "current_user"])
+    monkeypatch.setattr(stat, "get_command_stdout_lines", lambda **_: lines)
+    result = stat._apply_slurm_reservation_state(
+        _node_frame(), stat.get_squeue_user_df([]), args, 1
+    )
+    assert result["ncore_available"].eq(0).all()
+
+
+@pytest.mark.parametrize(
+    "field,value,missing",
+    [
+        ("slots", None, "slots"),
+        ("slots", "invalid", "slots"),
+        ("slots", -1, "slots"),
+        ("slots", 1.5, "slots"),
+        ("JB_owner", None, "user"),
+        ("JB_owner", "", "user"),
+        ("state", None, "state"),
+        ("state", "", "state"),
+    ],
+)
+def test_incomplete_uge_json_cannot_be_a_complete_cluster_total(
+    field, value, missing, monkeypatch, capsys
+):
+    job = {
+        "JB_job_number": 1,
+        "JB_owner": "current_user",
+        "state": "r",
+        "queue_name": "main.q@node01",
+        "slots": 16,
+    }
+    if value is None:
+        job.pop(field)
+    else:
+        job[field] = value
+    lines = [json.dumps({"job_info": {"job_list": [job]}})]
+    parsed = stat.get_uge_json_job_df(lines)
+    assert parsed.attrs["rejected_rows"] == 1
+    assert missing in parsed.attrs["missing_fields"]
+    monkeypatch.setattr(stat, "get_command_stdout_lines", lambda **_: lines)
+    fallback = stat.get_user_df([])
+    result, all_users = stat._get_uge_all_user_jobs(
+        Namespace(uge_job_command="qstat", uge_job_example_file=""), fallback, 1
+    )
+    assert result is fallback
+    assert not all_users
+    assert "degraded" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("parent_waits", [False, True])
+@pytest.mark.parametrize("allow_failure", [False, True])
+def test_detached_child_cannot_hold_command_capture_open(tmp_path, parent_waits, allow_failure):
+    pid_file = tmp_path / "child.pid"
+    child_code = "import time; time.sleep(60)"
+    parent_code = (
+        "import subprocess,sys,time; from pathlib import Path; "
+        f"p=subprocess.Popen([sys.executable,'-c',{child_code!r}],start_new_session=True); "
+        f"Path({str(pid_file)!r}).write_text(str(p.pid)); "
+        + ("time.sleep(60)" if parent_waits else "")
+    )
+    command = shlex.join([sys.executable, "-c", parent_code])
+    runner_code = (
+        "import json; from kfbatch.command import get_command_result; "
+        "from kfbatch.errors import KFBatchCommandError\n"
+        "try:\n"
+        f"    result=get_command_result({command!r}, timeout_seconds=0.2, "
+        f"allow_failure={allow_failure!r})\n"
+        "    print(json.dumps({'result': result}))\n"
+        "except KFBatchCommandError as error:\n"
+        "    print(json.dumps({'timed_out': error.timed_out, 'message': str(error)}))\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", runner_code],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        failure = json.loads(result.stdout)
+        if allow_failure:
+            assert failure == {"result": None}
+        else:
+            assert failure["timed_out"] is parent_waits
+            if not parent_waits:
+                assert "output pipes" in failure["message"]
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.parametrize(
@@ -322,7 +526,7 @@ def test_uge_json_rejected_job_is_not_a_complete_total(monkeypatch):
             {
                 "job_info": {
                     "job_list": [
-                        {"JB_job_number": 1, "JB_owner": "current_user", "state": "qw"},
+                        {"JB_job_number": 1, "JB_owner": "current_user", "state": "qw", "slots": 1},
                         {"JB_owner": "other_user", "state": "qw"},
                     ]
                 }

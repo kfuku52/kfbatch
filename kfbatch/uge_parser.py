@@ -10,7 +10,7 @@ from kfbatch.memory import (
     grid_engine_memory_series_to_gib,
 )
 from kfbatch.parse_quality import attach_parse_quality
-from kfbatch.parse_utils import _numeric_task_token_count, _safe_int
+from kfbatch.parse_utils import _numeric_task_token_count
 
 QSTAT_COLUMNS = [
     "queue_name",
@@ -348,16 +348,31 @@ def _iter_uge_json_jobs(data):
             for job_list in section_item.values():
                 if not isinstance(job_list, list):
                     continue
-                for job in job_list:
-                    if isinstance(job, dict):
-                        yield job
+                yield from job_list
+
+
+def _uge_json_missing_job_fields(job):
+    if not isinstance(job, dict):
+        return ("job",)
+    missing = []
+    job_id = str(job.get("JB_job_number", job.get("job_id", ""))).strip()
+    if not job_id.isdigit() or int(job_id) < 1:
+        missing.append("job_id")
+    for key, field in [("JB_owner", "user"), ("state", "state")]:
+        value = job.get(key)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(field)
+    slots = str(job.get("slots", ""))
+    if not slots.isdigit() or int(slots) < 1:
+        missing.append("slots")
+    return tuple(missing)
 
 
 def _uge_json_job_row(job, text_cache):
-    job_id = str(job.get("JB_job_number", job.get("job_id", ""))).strip()
-    if job_id == "":
+    if _uge_json_missing_job_fields(job):
         return None
-    slots = max(_safe_int(job.get("slots", 1), default=1), 0)
+    job_id = str(job.get("JB_job_number", job.get("job_id", ""))).strip()
+    slots = int(job["slots"])
     task_expression = str(
         job.get("ja_task_id", job.get("ja-task-ID", job.get("tasks", "")))
     ).strip()
@@ -399,8 +414,10 @@ def get_uge_json_job_df(lines):
     rows = []
     text_cache: dict[str, str] = {}
     candidate_rows = 0
+    missing_fields = set()
     for job in _iter_uge_json_jobs(data):
         candidate_rows += 1
+        missing_fields.update(_uge_json_missing_job_fields(job))
         row = _uge_json_job_row(job, text_cache)
         if row is not None:
             recognized_schema = True
@@ -410,10 +427,14 @@ def get_uge_json_job_df(lines):
     if len(rows) == 0:
         empty = _empty_uge_job_df()
         empty.attrs["recognized_schema"] = True
-        return attach_parse_quality(empty, candidate_rows=candidate_rows)
+        return attach_parse_quality(
+            empty, candidate_rows=candidate_rows, missing_fields=tuple(sorted(missing_fields))
+        )
     frame = pandas.DataFrame.from_records(rows, columns=UGE_JOB_COLUMNS)
     frame.attrs["recognized_schema"] = True
-    return attach_parse_quality(frame, candidate_rows=candidate_rows)
+    return attach_parse_quality(
+        frame, candidate_rows=candidate_rows, missing_fields=tuple(sorted(missing_fields))
+    )
 
 
 def _optional_int(value):

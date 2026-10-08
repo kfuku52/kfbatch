@@ -51,10 +51,17 @@ class _BoundedCapture:
             self.exceeded = True
 
 
-def _capture_stream(stream, capture):
+def _capture_stream(stream, capture, stop_event):
     try:
-        while True:
-            chunk = stream.read(64 * 1024)
+        descriptor = stream.fileno()
+        if os.name == "posix":
+            os.set_blocking(descriptor, False)
+        while not stop_event.is_set():
+            try:
+                chunk = os.read(descriptor, 64 * 1024)
+            except BlockingIOError:
+                stop_event.wait(PROCESS_POLL_INTERVAL_SECONDS)
+                continue
             if not chunk:
                 return
             capture.append(chunk)
@@ -155,7 +162,17 @@ def _subprocess_environment(command):
 def _signal_process_group(process, sig):
     if os.name == "posix":
         try:
-            os.killpg(process.pid, sig)
+            try:
+                os.killpg(process.pid, sig)
+            except PermissionError as error:
+                # macOS can report EPERM while the group leader is exiting.
+                # Wait briefly for it to become reapable, then retry so live
+                # descendants still receive the signal. Preserve genuine errors.
+                try:
+                    process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    raise error from None
+                os.killpg(process.pid, sig)
         except ProcessLookupError:
             pass
         return
@@ -180,6 +197,22 @@ def _terminate_process_group(process):
     _signal_process_group(process, signal.SIGKILL)
     if process.poll() is None:
         process.wait()
+
+
+def _join_capture_threads(threads):
+    deadline = time.monotonic() + PROCESS_TERMINATION_GRACE_SECONDS
+    for thread in threads:
+        thread.join(timeout=max(deadline - time.monotonic(), 0))
+    return not any(thread.is_alive() for thread in threads)
+
+
+def _finish_capture(process, threads, already_stopped):
+    finished = _join_capture_threads(threads)
+    if not finished:
+        if not already_stopped:
+            _terminate_process_group(process)
+        finished = _join_capture_threads(threads)
+    return not finished
 
 
 def _read_example_file(example_file, command_name):
@@ -235,40 +268,51 @@ def _run_command(command, command_name, timeout):
     process = subprocess.Popen(command, **popen_kwargs)  # nosec B603
     stdout_capture = _BoundedCapture(MAX_STDOUT_BYTES)
     stderr_capture = _BoundedCapture(MAX_STDERR_BYTES)
+    stop_event = threading.Event()
     stdout_thread = threading.Thread(
         target=_capture_stream,
-        args=(process.stdout, stdout_capture),
+        args=(process.stdout, stdout_capture, stop_event),
         name="kfbatch-stdout",
+        daemon=True,
     )
     stderr_thread = threading.Thread(
         target=_capture_stream,
-        args=(process.stderr, stderr_capture),
+        args=(process.stderr, stderr_capture, stop_event),
         name="kfbatch-stderr",
+        daemon=True,
     )
     stdout_thread.start()
     stderr_thread.start()
     deadline = None if timeout is None else time.monotonic() + timeout
     timed_out = False
     output_limited = False
-    while process.poll() is None:
-        if stdout_capture.exceeded or stderr_capture.exceeded:
-            output_limited = True
-            _terminate_process_group(process)
-            break
-        if deadline is not None and time.monotonic() >= deadline:
-            timed_out = True
-            _terminate_process_group(process)
-            break
-        time.sleep(PROCESS_POLL_INTERVAL_SECONDS)
-    stdout_thread.join(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
-    stderr_thread.join(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
-    if stdout_thread.is_alive() or stderr_thread.is_alive():
-        # A descendant inherited the capture pipes. End the command's whole
-        # session so background descendants cannot outlive the invocation.
-        _terminate_process_group(process)
-        stdout_thread.join()
-        stderr_thread.join()
+    threads = (stdout_thread, stderr_thread)
+    try:
+        while process.poll() is None:
+            if stdout_capture.exceeded or stderr_capture.exceeded:
+                output_limited = True
+                _terminate_process_group(process)
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                _terminate_process_group(process)
+                break
+            time.sleep(PROCESS_POLL_INTERVAL_SECONDS)
+        capture_incomplete = _finish_capture(process, threads, timed_out or output_limited)
+    finally:
+        # Detached children or signal errors must not leave POSIX readers waiting
+        # for EOF. Nonblocking reads let cancellation close their pipes promptly.
+        stop_event.set()
+        _join_capture_threads(threads)
     output_limited = output_limited or stdout_capture.exceeded or stderr_capture.exceeded
+    if capture_incomplete and not (timed_out or output_limited):
+        raise KFBatchCommandError(
+            f"Failed to read {_command_summary(command_name, command)}: "
+            "inherited output pipes did not close after process-group cleanup.",
+            command_name=command_name,
+            argv=command,
+            returncode=process.returncode,
+        )
     return (
         process.returncode,
         bytes(stdout_capture.data),
@@ -349,6 +393,19 @@ def _command_result_lines(
         raise
 
 
+def _validated_timeout(timeout_seconds, command_name):
+    message = (
+        f"Failed to run {_safe_label(command_name)}: timeout must be a finite non-negative number."
+    )
+    try:
+        timeout_value = 0.0 if timeout_seconds is None else float(timeout_seconds)
+    except (TypeError, ValueError) as error:
+        raise KFBatchCommandError(message, command_name=command_name) from error
+    if not math.isfinite(timeout_value) or timeout_value < 0:
+        raise KFBatchCommandError(message, command_name=command_name)
+    return timeout_value or None
+
+
 def get_command_result(
     command_str,
     example_file="",
@@ -384,30 +441,16 @@ def get_command_result(
             command_name=command_name,
         )
     try:
-        timeout_value = 0.0 if timeout_seconds is None else float(timeout_seconds)
-    except (TypeError, ValueError) as error:
-        if allow_failure:
-            return None
-        raise KFBatchCommandError(
-            f"Failed to run {_safe_label(command_name)}: timeout must be a finite "
-            "non-negative number.",
-            command_name=command_name,
-        ) from error
-    if not math.isfinite(timeout_value) or timeout_value < 0:
-        if allow_failure:
-            return None
-        raise KFBatchCommandError(
-            f"Failed to run {_safe_label(command_name)}: timeout must be a finite "
-            "non-negative number.",
-            command_name=command_name,
-        )
-    timeout = timeout_value or None
-    try:
+        timeout = _validated_timeout(timeout_seconds, command_name)
         returncode, stdout, stderr, timed_out, output_limited = _run_command(
             command,
             command_name,
             timeout,
         )
+    except KFBatchCommandError:
+        if allow_failure:
+            return None
+        raise
     except OSError as error:
         if allow_failure:
             return None
