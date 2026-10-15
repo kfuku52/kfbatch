@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import repeat
 
 from kfbatch.job_states import slurm_bucket as _slurm_bucket, uge_bucket as _uge_bucket
 
@@ -19,13 +20,16 @@ def aggregate_jobs(frame, scheduler):
     counts = {"running": 0, "queued": 0, "failed": 0, "other": 0}
     if frame is None or frame.shape[0] == 0:
         return JobTotals()
-    for _index, row in frame.iterrows():
+    states = frame.get("state", repeat("", len(frame)))
+    queues = frame.get("queue_name", repeat("", len(frame)))
+    slot_counts = frame.get("total_slots", repeat(0, len(frame)))
+    for state, queue, value in zip(states, queues, slot_counts, strict=True):
         if scheduler == "slurm":
-            bucket = _slurm_bucket(row.get("state", ""))
+            bucket = _slurm_bucket(state)
         else:
-            bucket = _uge_bucket(row.get("state", ""), row.get("queue_name", ""))
+            bucket = _uge_bucket(state, queue)
         try:
-            slots = int(row.get("total_slots", 0))
+            slots = int(value)
         except (TypeError, ValueError):
             slots = 0
         counts[bucket] += max(slots, 0)

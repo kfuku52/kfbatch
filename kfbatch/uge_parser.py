@@ -199,14 +199,16 @@ def _merge_qstat_common_rows(df_base, df_new, common_index):
         if "status" in df_new.columns
         else pandas.Series("", index=common_index)
     )
-    for row_index in common_index:
+    statuses = []
+    for previous, current in zip(df_base.loc[common_index, "status"], new_status, strict=True):
         tokens = []
-        for value in [df_base.at[row_index, "status"], new_status.at[row_index]]:
+        for value in [previous, current]:
             for token in str(value or "").split("|"):
                 token = token.strip()
                 if token and token not in tokens:
                     tokens.append(token)
-        df_base.at[row_index, "status"] = "|".join(tokens)
+        statuses.append("|".join(tokens))
+    df_base.loc[common_index, "status"] = statuses
 
 
 def _merge_qstat_iteration_min_availability(df, df_i):

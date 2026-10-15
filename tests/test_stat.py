@@ -798,6 +798,61 @@ def test_fairshare_summary_labels_distinct_pending_account(capsys):
     assert "pending_account=account_b" in out
 
 
+def test_fairshare_pending_associations_deduplicate_jobs_and_count_missing_shares():
+    shares = pandas.DataFrame(
+        {
+            "user": ["current_user", "current_user", "user_a", "other_user"],
+            "account": ["account_a", "account_b", "account_a", "account_a"],
+            "fairshare": [0.7, 0.9, 0.8, float("nan")],
+        }
+    )
+    jobs = pandas.DataFrame(
+        {
+            "user": ["current_user", "user_a", "other_user", "missing_user"] * 100,
+            "account": ["account_b", "", "account_a", ""] * 100,
+            "state": ["PENDING"] * 400,
+        }
+    )
+    summary = get_slurm_fairshare_rank_summary(jobs, shares, "current_user")
+    assert summary["account"] == "account_b"
+    assert summary["overall_total"] == 3
+    assert summary["pending_total"] == 2
+    assert summary["pending_rank"] == 1
+    assert summary["pending_missing"] == 2
+
+
+@pytest.mark.parametrize("include_account", [False, True])
+def test_fairshare_missing_job_accounts_use_ranked_associations(include_account):
+    shares = pandas.DataFrame(
+        {
+            "user": ["current_user", "other_user", "other_user", "other_user"],
+            "account": ["account_a", "account_a", "account_b", "account_b"],
+            "fairshare": [0.5, float("nan"), 0.8, 0.1],
+        }
+    )
+    jobs = pandas.DataFrame({"user": ["current_user", "other_user"], "state": ["PD", "PD"]})
+    if include_account:
+        jobs["account"] = ""
+    summary = get_slurm_fairshare_rank_summary(jobs, shares, "current_user")
+    assert summary["pending_total"] == 2
+    assert summary["pending_rank"] == 2
+    assert summary["pending_missing"] == 0
+
+
+def test_uge_job_summary_uses_rows_with_nonsequential_indices(capsys):
+    jobs = pandas.DataFrame(
+        {
+            "state": ["Rq", "Eqw", "", "h"],
+            "queue_name": ["main.q", "main.q", "main.q", ""],
+            "total_slots": [2, 3, 4, 5],
+            "user": ["current_user"] * 4,
+        },
+        index=[9, 2, 8, 1],
+    )
+    stat_module.print_queued_job_summary(jobs, "uge", "current_user")
+    assert "self:R/Q/F=4/7/3  all:R/Q/F=4/7/3" in capsys.readouterr().out
+
+
 def test_multi_partition_priority_blocked_job_keeps_resource_ceiling():
     df_node = pandas.DataFrame(
         {
@@ -1359,6 +1414,24 @@ def test_merge_qstat_snapshots_preserves_any_abnormal_status_and_unknown_memory(
     assert "d" in merged.at[0, "status"]
     assert pandas.isna(merged.at[0, "hc:mem_req"])
     assert bool(merged.at[0, "hc:mem_req_known"]) is False
+
+
+def test_merge_qstat_statuses_follow_node_keys_and_preserve_first_seen_flags():
+    first = get_qstat_df(
+        [
+            "main.q@node01 BP 0/0/8 0 linux",
+            "main.q@node02 BP 0/0/8 0 linux",
+            "main.q@node03 BP 0/0/8 0 linux",
+        ]
+    )
+    first["status"] = ["a|d|a", "", "E"]
+    second = first.iloc[::-1].copy()
+    second["status"] = ["d| E |d", "a|a", "d| E |"]
+    merged = stat_module._merge_qstat_iteration_min_availability(first, second)
+    assert merged["node_name"].tolist() == ["node01", "node02", "node03"]
+    assert merged["status"].tolist() == ["a|d|E", "a", "E|d"]
+    assert merged["ncore_available"].tolist() == [8, 8, 8]
+    assert not merged["hc:mem_req_known"].any()
 
 
 def test_get_df_qstat_handles_empty_later_iteration(monkeypatch):

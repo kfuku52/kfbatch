@@ -875,8 +875,8 @@ def print_queued_job_summary(
         queue_names = pandas.Series("", index=df_user.index)
     state_codes = pandas.Series(
         [
-            _normalize_uge_job_state(df_user.at[i, "state"], queue_names.at[i])
-            for i in df_user.index
+            _normalize_uge_job_state(state, queue)
+            for state, queue in zip(df_user["state"], queue_names, strict=True)
         ],
         index=df_user.index,
     )
@@ -992,6 +992,44 @@ def _current_user_fairshare_account(df_job, df_share, current_user):
     return _resolve_fairshare_account(df_share, current_user)
 
 
+def _pending_fairshare_rows(df_pending, df_share, df_ranked):
+    if df_pending.empty:
+        return [], 0
+    # Ranked rows are already ordered; the first association is the user's best.
+    rows_by_association: dict[tuple[Any, Any], dict[str, Any]] = {}
+    rows_by_user: dict[Any, dict[str, Any]] = {}
+    for row in df_ranked.to_dict("records"):
+        rows_by_association[(row["user"], row["account"])] = row
+        rows_by_user.setdefault(row["user"], row)
+    accounts_by_user: dict[Any, set[str]] = {}
+    for user, account in zip(df_share["user"], df_share["account"], strict=True):
+        if pandas.notna(account) and (account_text := str(account).strip()):
+            accounts_by_user.setdefault(user, set()).add(account_text)
+
+    pending_rows = []
+    pending_missing = 0
+    seen = set()
+    pairs = df_pending.reindex(columns=["user", "account"], fill_value="").drop_duplicates()
+    for user, account in pairs.itertuples(index=False, name=None):
+        user = str(user or "").strip()
+        account = str(account or "").strip()
+        if not user:
+            continue
+        if not account:
+            accounts = accounts_by_user.get(user, set())
+            account = next(iter(accounts)) if len(accounts) == 1 else ""
+        key = (user, account)
+        if key in seen:
+            continue
+        seen.add(key)
+        matched = rows_by_association.get(key) if account else rows_by_user.get(user)
+        if matched is None:
+            pending_missing += 1
+        else:
+            pending_rows.append(matched)
+    return pending_rows, pending_missing
+
+
 def get_slurm_fairshare_rank_summary(df_job, df_share, current_user=""):
     if current_user == "" or (df_share is None) or (df_share.shape[0] == 0):
         return None
@@ -1017,32 +1055,9 @@ def get_slurm_fairshare_rank_summary(df_job, df_share, current_user=""):
     pending_missing = 0
     if (df_job is not None) and (df_job.shape[0] > 0) and ("user" in df_job.columns):
         state_codes = df_job["state"].fillna("").map(_normalize_slurm_job_state)
-        df_pending = df_job.loc[state_codes.isin(SLURM_PENDING_STATES), :].copy()
-        pairs = []
-        seen = set()
-        for _, row in df_pending.iterrows():
-            user = str(row.get("user", "") or "").strip()
-            account = str(row.get("account", "") or "").strip()
-            if user == "":
-                continue
-            account = _resolve_fairshare_account(df_share, user, account)
-            key = (user, account)
-            if key in seen:
-                continue
-            seen.add(key)
-            pairs.append(key)
-        pending_rows = []
-        for user, account in pairs:
-            if account != "":
-                matched = df_ranked.loc[
-                    (df_ranked["user"] == user) & (df_ranked["account"] == account), :
-                ].copy()
-            else:
-                matched = df_ranked.loc[df_ranked["user"] == user, :].copy()
-            if matched.shape[0] == 0:
-                pending_missing += 1
-                continue
-            pending_rows.append(matched.sort_values(by=["fairshare_rank"]).iloc[0].to_dict())
+        pending_columns = ["user", "account"] if "account" in df_job.columns else ["user"]
+        df_pending = df_job.loc[state_codes.isin(SLURM_PENDING_STATES), pending_columns]
+        pending_rows, pending_missing = _pending_fairshare_rows(df_pending, df_share, df_ranked)
         if len(pending_rows) > 0:
             df_pending_ranked = pandas.DataFrame(pending_rows)
             df_pending_ranked = df_pending_ranked.sort_values(
@@ -1179,14 +1194,12 @@ def _smallest_priority_blocked_request(user_pending):
     if valid.shape[0] == 0:
         return None, None, "", "priority_blocked_missing_fields"
     valid["time_limit_minutes"] = valid["time_limit"].map(_slurm_time_to_minutes)
-    valid["req_mem_gb"] = valid.apply(
-        lambda row: slurm_request_memory_gib(
-            row["req_mem"],
-            req_cpus=row["req_cpus"],
-            num_nodes=row["num_nodes"],
-        ),
-        axis=1,
-    )
+    valid["req_mem_gb"] = [
+        slurm_request_memory_gib(memory, req_cpus=cpus, num_nodes=nodes)
+        for memory, cpus, nodes in zip(
+            valid["req_mem"], valid["req_cpus"], valid["num_nodes"], strict=True
+        )
+    ]
     known_memory = valid.loc[valid["req_mem_gb"].notna(), :].copy()
     if known_memory.shape[0] > 0:
         smallest = (

@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.14] - 2026-10-15
+
+### Changed
+
+- Aggregate group jobs and normalize Grid Engine job states directly from columns,
+  avoiding per-row Series construction and cell lookups on large reports.
+- Index Slurm FairShare associations and deduplicate pending job associations
+  before ranking, while retaining missing-share and multiple-account semantics.
+- Batch Grid Engine snapshot status updates and Slurm request-memory conversion
+  while preserving conservative resource ceilings and existing output schemas.
+- Install only runtime and test dependencies in the five Python-version CI jobs;
+  retain full development tooling in the quality/package job.
+- Add repeatable synthetic report benchmarks with output checksums, separate
+  wall-time and allocation measurements, and a documented performance audit.
+- Remove an interpreter-startup race from the detached-child capture regression
+  while retaining its outer timeout and pipe-cleanup assertions.
+
 ## [0.4.13] - 2026-10-13
 
 - Notify the central Dependabot controller after prepared updates finish CI.

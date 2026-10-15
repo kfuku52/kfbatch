@@ -299,11 +299,14 @@ def test_detached_child_cannot_hold_command_capture_open(tmp_path, parent_waits,
         + ("time.sleep(60)" if parent_waits else "")
     )
     command = shlex.join([sys.executable, "-c", parent_code])
+    # An exiting parent must exercise pipe cleanup, independent of Python startup
+    # time under coverage or host contention. The outer five-second bound stays.
+    command_timeout = 0.2 if parent_waits else 0
     runner_code = (
         "import json; from kfbatch.command import get_command_result; "
         "from kfbatch.errors import KFBatchCommandError\n"
         "try:\n"
-        f"    result=get_command_result({command!r}, timeout_seconds=0.2, "
+        f"    result=get_command_result({command!r}, timeout_seconds={command_timeout}, "
         f"allow_failure={allow_failure!r})\n"
         "    print(json.dumps({'result': result}))\n"
         "except KFBatchCommandError as error:\n"
@@ -318,6 +321,8 @@ def test_detached_child_cannot_hold_command_capture_open(tmp_path, parent_waits,
             check=True,
         )
         failure = json.loads(result.stdout)
+        if not parent_waits:
+            assert pid_file.exists()
         if allow_failure:
             assert failure == {"result": None}
         else:

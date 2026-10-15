@@ -94,6 +94,8 @@ Keep these distinct from offline verification:
 - `python -m benchmarks.benchmark_parsers` is an opt-in synthetic performance
   workload (up to 100,000 jobs by default), not a routine smoke check. Consult the
   performance skill before benchmarking; no performance claim follows from pytest.
+  [Performance audit](docs/performance.md) documents the repeated report workload,
+  output-equivalence checks, and before/after measurements.
 - Live scheduler, SSH wrapper, `qlogin`, and site quota checks require the relevant
   site environment and explicit task scope. Do not collect private captures to
   compensate for a missing environment.
