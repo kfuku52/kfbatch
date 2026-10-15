@@ -4,6 +4,7 @@ import re
 import shlex
 import tempfile
 import time
+from functools import lru_cache
 from typing import Any
 
 import pandas
@@ -30,6 +31,7 @@ from kfbatch.memory import (
 )
 from kfbatch.parse_quality import rejected_rows
 from kfbatch.parse_utils import (
+    _map_repeated_strings,
     _numeric_task_token_count as _numeric_task_token_count,
     _safe_int as _safe_int,
 )
@@ -525,20 +527,23 @@ def _expand_reservation_rows(df_node, df_reservation):
     rows = []
     unresolved_targets = []
     unresolved_partitions = set()
-    for _, reservation in df_reservation.iterrows():
+    queue_targets = {}
+    for values in df_reservation.itertuples(index=False, name=None):
+        reservation = dict(zip(df_reservation.columns, values, strict=True))
         node_name = str(reservation.get("node_name", "") or "").strip()
         queue_name = str(reservation.get("queue_name", "") or "").strip()
         if node_name == "*":
-            if queue_name:
-                targets = (
+            if queue_name not in queue_targets:
+                queue_targets[queue_name] = (
                     df_node.loc[df_node["queue_name"].astype(str) == queue_name, "node_name"]
                     .dropna()
                     .astype(str)
                     .unique()
                     .tolist()
+                    if queue_name
+                    else sorted(available_nodes)
                 )
-            else:
-                targets = sorted(available_nodes)
+            targets = queue_targets[queue_name]
         else:
             targets = [node_name] if node_name in available_nodes else []
         if not targets:
@@ -548,7 +553,7 @@ def _expand_reservation_rows(df_node, df_reservation):
             unresolved_partitions.add(queue_name)
             continue
         for target in targets:
-            row = reservation.to_dict()
+            row = reservation.copy()
             row["node_name"] = target
             rows.append(row)
     expanded = pandas.DataFrame(rows, columns=df_reservation.columns)
@@ -1193,9 +1198,10 @@ def _smallest_priority_blocked_request(user_pending):
     ].copy()
     if valid.shape[0] == 0:
         return None, None, "", "priority_blocked_missing_fields"
-    valid["time_limit_minutes"] = valid["time_limit"].map(_slurm_time_to_minutes)
+    valid["time_limit_minutes"] = _map_repeated_strings(valid["time_limit"], _slurm_time_to_minutes)
+    request_memory = _request_memory_converter(valid)
     valid["req_mem_gb"] = [
-        slurm_request_memory_gib(memory, req_cpus=cpus, num_nodes=nodes)
+        request_memory(memory, cpus, nodes)
         for memory, cpus, nodes in zip(
             valid["req_mem"], valid["req_cpus"], valid["num_nodes"], strict=True
         )
@@ -1234,6 +1240,36 @@ def _smallest_priority_blocked_request(user_pending):
     )
 
 
+def _request_memory_converter(requests):
+    if len(requests) < 256:
+        return slurm_request_memory_gib
+    sample = requests.iloc[:: max(len(requests) // 128, 1)].iloc[:128]
+    keys = list(zip(sample["req_mem"], sample["req_cpus"], sample["num_nodes"], strict=True))
+    # Scheduler request columns contain strings and numbers. Keep unusual caller
+    # values on the scalar path, including unhashable invalid CPU counts.
+    if not all(
+        isinstance(memory, str)
+        and isinstance(cpus, (int, float))
+        and isinstance(nodes, (int, float))
+        for memory, cpus, nodes in keys
+    ):
+        return slurm_request_memory_gib
+    if len(set(keys)) > 64:
+        return slurm_request_memory_gib
+    cached = lru_cache(maxsize=256, typed=True)(slurm_request_memory_gib)
+
+    def convert(memory, cpus, nodes):
+        if (
+            isinstance(memory, str)
+            and isinstance(cpus, (int, float))
+            and isinstance(nodes, (int, float))
+        ):
+            return cached(memory, cpus, nodes)
+        return slurm_request_memory_gib(memory, cpus, nodes)
+
+    return convert
+
+
 def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=""):
     columns = [
         "queue_name",
@@ -1254,6 +1290,10 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=""
     ]
     if (df_node is None) or (df_node.shape[0] == 0):
         return pandas.DataFrame(columns=columns)
+    # Topology attrs are needed by reservation accounting, but unused here.
+    # Keep the caller's metadata while avoiding its deepcopy on every selection.
+    df_node = df_node.copy(deep=False)
+    df_node.attrs = {}
     user_pending_by_partition = {}
     if (
         current_user
@@ -1550,10 +1590,14 @@ def _get_slurm_df(args, timeout_seconds):
 
 
 def _get_uge_all_user_jobs(args, fallback, timeout_seconds):
+    # Existing callers may pass a DataFrame; orchestration can defer its parser.
+    def embedded_jobs():
+        return fallback() if callable(fallback) else fallback
+
     command = getattr(args, "uge_job_command", "")
     example_file = getattr(args, "uge_job_example_file", "")
     if command == "" and example_file == "":
-        return fallback, False
+        return embedded_jobs(), False
     job_lines = get_command_stdout_lines(
         command_str=command,
         example_file=example_file,
@@ -1567,7 +1611,7 @@ def _get_uge_all_user_jobs(args, fallback, timeout_seconds):
             "AGE/UGE/SGE all-user jobs",
             "--uge_job_command failed or timed out; using jobs embedded in qstat -F",
         )
-        return fallback, False
+        return embedded_jobs(), False
     first_character = next(
         (stripped[0] for line in job_lines if (stripped := str(line).lstrip()) != ""),
         "",
@@ -1579,7 +1623,7 @@ def _get_uge_all_user_jobs(args, fallback, timeout_seconds):
                 "AGE/UGE/SGE all-user jobs",
                 "text schema was not recognized or rows were rejected; using jobs embedded in qstat -F",
             )
-            return fallback, False
+            return embedded_jobs(), False
         return parsed, True
     parsed = get_uge_json_job_df(job_lines)
     if parsed is not None and not rejected_rows(parsed) and not parsed.attrs.get("missing_fields"):
@@ -1589,7 +1633,7 @@ def _get_uge_all_user_jobs(args, fallback, timeout_seconds):
         "JSON schema was not recognized, rows were rejected, or required fields were missing; "
         "using jobs embedded in qstat -F",
     )
-    return fallback, False
+    return embedded_jobs(), False
 
 
 def _get_uge_df(args, timeout_seconds):
@@ -1630,7 +1674,7 @@ def _get_uge_df(args, timeout_seconds):
         df = snapshot
         df_user, has_all_user_jobs = _get_uge_all_user_jobs(
             args,
-            get_user_df(lines),
+            lambda lines=lines: get_user_df(lines),
             timeout_seconds,
         )
         print_queued_job_summary(

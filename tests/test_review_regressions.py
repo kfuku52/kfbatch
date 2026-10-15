@@ -12,7 +12,7 @@ from dataclasses import astuple
 import pandas
 import pytest
 
-from kfbatch import stat
+from kfbatch import command as command_module, memory, stat, uge_parser
 from kfbatch.batch_scope import aggregate_jobs, print_group_job_summary
 from kfbatch.cli import _build_parser
 from kfbatch.command import get_command_result
@@ -20,6 +20,155 @@ from kfbatch.errors import KFBatchCommandError
 from kfbatch.job_states import SLURM_STATE_NAME_TO_CODE, slurm_bucket
 from kfbatch.memory import grid_engine_memory_text_to_gib
 from kfbatch.quota import _collect_records, _matches_filesystem, parse_quota_lines
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"",
+        b"\n\n",
+        b"a\nb\n",
+        b"a\nb",
+        b"a\rb\r",
+        b"a\r\nb\r\n",
+        b"a\x0bb\x0c",
+        b"a\xff\nb\n",
+        "日本語\n次\n".encode(),
+    ],
+)
+def test_bounded_decoder_preserves_scheduler_line_semantics(data):
+    expected = command_module._decode_scheduler_lines(data.splitlines())
+    assert command_module._decode_bounded_lines(data, "synthetic") == expected
+
+
+@pytest.mark.parametrize("ending", [b"", b"\n", b"\r", b"\r\n"])
+def test_bounded_decoder_counts_content_bytes(monkeypatch, ending):
+    monkeypatch.setattr(command_module, "MAX_OUTPUT_LINE_BYTES", 8)
+    assert command_module._decode_bounded_lines(b"x" * 8 + ending, "synthetic") == ["x" * 8]
+    with pytest.raises(KFBatchCommandError) as error:
+        command_module._decode_bounded_lines(b"x" * 9 + ending, "synthetic")
+    assert error.value.output_limited
+
+
+def test_command_capture_preserves_both_large_streams():
+    code = "import os; [(os.write(1,b'out\\n'*4096),os.write(2,b'err\\n'*4096)) for _ in range(16)]"
+    result = get_command_result(shlex.join([sys.executable, "-c", code]), timeout_seconds=10)
+    assert result.stdout_lines == ["out"] * 65536
+    assert result.stderr == ("err\n" * 16384).strip() + "\n[stderr truncated]"
+
+
+def test_sshare_keeps_scalar_rounding_for_mixed_huge_integers():
+    tokens = ["9223372036854775808", "18446744073709551616", "0.1", "bad", "-1", "1e309"]
+    frame = stat.get_sshare_df(
+        [f"account_a|user{i}|1|{v}|{v}|{v}|{v}" for i, v in enumerate(tokens)]
+    )
+    expected = pandas.to_numeric(
+        pandas.Series([pandas.to_numeric(v, errors="coerce") for v in tokens]), errors="coerce"
+    )
+    for column in ["norm_shares", "raw_usage", "effective_usage", "fairshare"]:
+        pandas.testing.assert_series_equal(frame[column], expected.rename(column), check_exact=True)
+
+
+@pytest.mark.parametrize("repeated", [False, True])
+@pytest.mark.parametrize("grid_engine", [False, True])
+def test_memory_column_conversion_keeps_values_types_and_unknowns(repeated, grid_engine):
+    values = (
+        ["64G", "1000m", "invalid", "1Gn"] * 256 if repeated else [f"{i}M" for i in range(1024)]
+    )
+    # The later scalars exercise cache bypass after a representative string sample.
+    values[-5:] = [True, 1.0, pandas.NA, None, float("nan")]
+    series = pandas.Series(values, dtype=object, index=range(100, 1124))
+    scalar = memory.grid_engine_memory_text_to_gib if grid_engine else memory.memory_text_to_gib
+    convert = (
+        memory.grid_engine_memory_series_to_gib if grid_engine else memory.memory_series_to_gib
+    )
+    pandas.testing.assert_series_equal(convert(series), series.map(scalar), check_exact=True)
+    changed = series.copy()
+    changed.iloc[0] = "128G"
+    pandas.testing.assert_series_equal(convert(changed), changed.map(scalar), check_exact=True)
+
+
+def test_request_cache_retains_scalar_semantics_for_unusual_values():
+    requests = pandas.DataFrame(
+        {"req_mem": ["2Gc"] * 1024, "req_cpus": [2] * 1024, "num_nodes": [1] * 1024}
+    )
+    convert = stat._request_memory_converter(requests)
+    for cpus in [True, 1.0, 2, "invalid", [], None, pandas.NA]:
+        actual = convert("2Gc", cpus, 1)
+        expected = memory.slurm_request_memory_gib("2Gc", cpus, 1)
+        assert actual == expected or (pandas.isna(actual) and pandas.isna(expected))
+
+
+@pytest.mark.parametrize("all_tiers", [False, True])
+def test_render_and_launch_preserve_original_topology_attrs(capsys, all_tiers):
+    nodes = stat.adjust_ram_unit(_node_frame())
+    original = nodes.copy(deep=True)
+    clean = nodes.copy(deep=False)
+    clean.attrs = {}
+    options = Namespace(ntop=1, all_tiers=all_tiers, exclude_abnormal_node=True)
+    stat.print_slurm_compact_summary(clean, None, options)
+    expected_output = capsys.readouterr().out
+    stat.print_slurm_compact_summary(nodes, None, options)
+    assert capsys.readouterr().out == expected_output
+    pandas.testing.assert_frame_equal(
+        stat.get_slurm_launch_heuristic_df(nodes, None),
+        stat.get_slurm_launch_heuristic_df(clean, None),
+        check_exact=True,
+    )
+    pandas.testing.assert_frame_equal(nodes, original, check_exact=True)
+    assert nodes.attrs == original.attrs
+    assert "slurm_cpus_per_core" in nodes.attrs
+
+
+def test_reservation_expansion_preserves_order_and_unknown_targets():
+    reservations = pandas.DataFrame(
+        [
+            {"reservation_name": "r1", "node_name": "*", "queue_name": "main"},
+            {"reservation_name": "r2", "node_name": "*", "queue_name": "main"},
+            {"reservation_name": "r3", "node_name": "*", "queue_name": "missing"},
+            {"reservation_name": "r4", "node_name": "missing", "queue_name": "short"},
+            {"reservation_name": "r5", "node_name": "node01", "queue_name": "short"},
+        ]
+    )
+    expanded = stat._expand_reservation_rows(_node_frame(), reservations)
+    assert expanded["reservation_name"].tolist() == ["r1", "r2", "r5"]
+    assert expanded["node_name"].tolist() == ["node01"] * 3
+    assert expanded.attrs == {
+        "unresolved_targets": ["r3:*", "r4:missing"],
+        "unresolved_partitions": ["missing", "short"],
+    }
+
+
+@pytest.mark.parametrize("response", [None, ["unrecognized"], [], ['{"job_info":{"jobs":[]}}']])
+def test_uge_embedded_fallback_is_parsed_only_when_needed(monkeypatch, response):
+    monkeypatch.setattr(stat, "get_command_stdout_lines", lambda **_: response)
+    fallback = stat.get_user_df([])
+    calls = []
+
+    def embedded():
+        calls.append(True)
+        return fallback
+
+    result, complete = stat._get_uge_all_user_jobs(
+        Namespace(uge_job_command="qstat", uge_job_example_file=""), embedded, 1
+    )
+    expected_complete = response in ([], ['{"job_info":{"jobs":[]}}'])
+    assert complete == expected_complete
+    assert len(calls) == (0 if complete else 1)
+    if not complete:
+        assert result is fallback
+
+
+def test_qfree_members_keep_first_seen_order_and_group_ambiguity():
+    lines = [
+        "\x1b[1mTHE NUMBER OF RUNNING JOBS BY USER IN THE GROUP (group_a)\x1b[0m",
+        "QNAME user_b user_a user_b invalid!",
+        "THE NUMBER OF MEM_REQ BY USER IN THE GROUP (group_a)",
+        "QNAME user_c user_a",
+    ]
+    assert uge_parser._qfree_group_context(lines) == ("group_a", ["user_b", "user_a", "user_c"])
+    lines.append("THE NUMBER OF MEM_REQ BY USER IN THE GROUP (group_b)")
+    assert uge_parser._qfree_group_context(lines) == ("", ["user_b", "user_a", "user_c"])
 
 
 @pytest.mark.parametrize("indent", ["", " ", "        ", "\t"])

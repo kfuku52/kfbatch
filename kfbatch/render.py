@@ -151,6 +151,10 @@ def _print_compact_table(rows, columns):
 
 
 def print_slurm_compact_summary(df, df_launch, args):
+    # Resource-accounting metadata is unused in rendering. Retain it on the
+    # caller's frame instead of repeatedly deep-copying it into temporary frames.
+    df = df.copy(deep=False)
+    df.attrs = {}
     queue_names = [q for q in df["queue_name"].unique().tolist() if not str(q).startswith("login")]
     launch_rows = {}
     if (df_launch is not None) and (df_launch.shape[0] > 0):

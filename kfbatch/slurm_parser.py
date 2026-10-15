@@ -1,6 +1,7 @@
 """Slurm parser helpers, independent of command execution."""
 
 import re
+from functools import lru_cache
 
 import pandas
 
@@ -442,6 +443,13 @@ def get_sshare_df(lines):
         "effective_usage",
         "fairshare",
     ]
+
+    # Scalar conversion preserves pandas' legacy rounding for mixed huge integers.
+    # A bounded, per-snapshot cache reuses common normalized-share/usage tokens.
+    @lru_cache(maxsize=256)
+    def numeric(value):
+        return pandas.to_numeric(value, errors="coerce")
+
     rows = []
     for raw_line in lines:
         line = raw_line.strip()
@@ -461,10 +469,10 @@ def get_sshare_df(lines):
                 "account": account,
                 "user": user,
                 "raw_shares": _safe_int(items[2], default=0),
-                "norm_shares": pandas.to_numeric(items[3], errors="coerce"),
-                "raw_usage": pandas.to_numeric(items[4], errors="coerce"),
-                "effective_usage": pandas.to_numeric(items[5], errors="coerce"),
-                "fairshare": pandas.to_numeric(items[6], errors="coerce"),
+                "norm_shares": numeric(items[3]),
+                "raw_usage": numeric(items[4]),
+                "effective_usage": numeric(items[5]),
+                "fairshare": numeric(items[6]),
             }
         )
     df = pandas.DataFrame(rows, columns=columns)

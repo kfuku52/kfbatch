@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import codecs
+import io
 import locale
 import math
 import os
 import pathlib
+import selectors
 import shlex
 import signal
 import stat
@@ -56,6 +58,19 @@ def _capture_stream(stream, capture, stop_event):
         descriptor = stream.fileno()
         if os.name == "posix":
             os.set_blocking(descriptor, False)
+            with selectors.DefaultSelector() as selector:
+                selector.register(descriptor, selectors.EVENT_READ)
+                while not stop_event.is_set():
+                    if not selector.select(PROCESS_POLL_INTERVAL_SECONDS):
+                        continue
+                    try:
+                        chunk = os.read(descriptor, 64 * 1024)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        return
+                    capture.append(chunk)
+            return
         while not stop_event.is_set():
             try:
                 chunk = os.read(descriptor, 64 * 1024)
@@ -116,15 +131,22 @@ def _decode_scheduler_lines(binary_lines):
 
 
 def _decode_bounded_lines(data, command_name):
-    raw_lines = data.splitlines()
-    if any(len(line) > MAX_OUTPUT_LINE_BYTES for line in raw_lines):
-        raise KFBatchCommandError(
-            f"Failed to read {command_name}: an output line exceeded "
-            f"{MAX_OUTPUT_LINE_BYTES} bytes.",
-            command_name=command_name,
-            output_limited=True,
-        )
-    return _decode_scheduler_lines(raw_lines)
+    # LF is the usual scheduler format. Stream it to avoid retaining a second
+    # full list of binary lines; preserve splitlines' CR/CRLF handling otherwise.
+    raw_lines = data.splitlines() if b"\r" in data else io.BytesIO(data)
+    encodings = _scheduler_output_encodings()
+    lines = []
+    for raw_line in raw_lines:
+        line = raw_line.removesuffix(b"\n")
+        if len(line) > MAX_OUTPUT_LINE_BYTES:
+            raise KFBatchCommandError(
+                f"Failed to read {command_name}: an output line exceeded "
+                f"{MAX_OUTPUT_LINE_BYTES} bytes.",
+                command_name=command_name,
+                output_limited=True,
+            )
+        lines.append(_decode_scheduler_bytes(line, encodings).rstrip("\r\n"))
+    return lines
 
 
 def _read_scheduler_error(data):

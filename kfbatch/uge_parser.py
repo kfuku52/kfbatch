@@ -373,6 +373,10 @@ def _uge_json_missing_job_fields(job):
 def _uge_json_job_row(job, text_cache):
     if _uge_json_missing_job_fields(job):
         return None
+    return _uge_json_validated_job_row(job, text_cache)
+
+
+def _uge_json_validated_job_row(job, text_cache):
     job_id = str(job.get("JB_job_number", job.get("job_id", ""))).strip()
     slots = int(job["slots"])
     task_expression = str(
@@ -419,11 +423,12 @@ def get_uge_json_job_df(lines):
     missing_fields = set()
     for job in _iter_uge_json_jobs(data):
         candidate_rows += 1
-        missing_fields.update(_uge_json_missing_job_fields(job))
-        row = _uge_json_job_row(job, text_cache)
-        if row is not None:
-            recognized_schema = True
-            rows.append(row)
+        missing = _uge_json_missing_job_fields(job)
+        missing_fields.update(missing)
+        if missing:
+            continue
+        recognized_schema = True
+        rows.append(_uge_json_validated_job_row(job, text_cache))
     if not recognized_schema:
         return None
     if len(rows) == 0:
@@ -453,6 +458,7 @@ def _qfree_group_context(lines):
     ansi_escape = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
     group_names = []
     group_users: list[str] = []
+    seen_users = set()
     in_group_table = False
     for raw_line in lines:
         line = ansi_escape.sub("", str(raw_line)).strip()
@@ -469,11 +475,10 @@ def _qfree_group_context(lines):
             continue
         items = re.split(r"\s+", line)
         if in_group_table and items and items[0].upper() == "QNAME":
-            group_users.extend(
-                user
-                for user in items[1:]
-                if re.fullmatch(r"[A-Za-z0-9_.-]+", user) and user not in group_users
-            )
+            for user in items[1:]:
+                if re.fullmatch(r"[A-Za-z0-9_.-]+", user) and user not in seen_users:
+                    seen_users.add(user)
+                    group_users.append(user)
     unique_names = set(group_names)
     return (group_names[0] if len(unique_names) == 1 else ""), group_users
 

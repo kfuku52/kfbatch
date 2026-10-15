@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.15] - 2026-10-15
+
+### Changed
+
+- Avoid repeated topology-metadata copies in Slurm rendering and launch ceilings,
+  preserving the caller's metadata and reservation accounting.
+- Defer unused embedded Grid Engine job parsing and validate JSON job fields once.
+- Expand reservations from plain records, reuse wildcard targets, and deduplicate
+  qfree group members with an order-preserving set.
+- Reuse repeated memory, time, and sshare tokens with bounded snapshot-local caches;
+  keep mostly unique memory columns on the direct path and preserve scalar rounding.
+- Wait for POSIX pipe readiness instead of sleeping between reads, and decode LF
+  output without retaining a second full binary-line list. All capture limits and
+  timeout/descendant cleanup remain in place.
+- Prefer PR merge checks over duplicate branch-push checks, run Python 3.12 tests
+  once with coverage, and publish the distributions already validated by tag CI.
+- Add synthetic hot-path benchmarks and compatibility regressions for these changes.
+
 ## [0.4.14] - 2026-10-15
 
 ### Changed

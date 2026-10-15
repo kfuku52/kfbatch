@@ -124,3 +124,90 @@ Checked-in regression tests cover missing columns, malformed slot values, queue
 state precedence, repeated associations, unranked shares, and status ordering.
 The existing parser benchmark was also executed as the initial parsing baseline;
 its parser implementations were not changed by this audit.
+
+## 0.4.15 follow-up audit
+
+Baseline: `b291889463dc240acd0aaab9b19c0b3371a11aef` (0.4.14). Measured on
+2026-10-15 with Python 3.14.7, pandas 3.0.6, macOS 27.0.1 arm64. Inputs are
+synthetic and constructed before measurement. Each operation is warmed once,
+then measured five times; peak Python allocation is a separate traced invocation.
+All 14 before/after checksums matched. Another 265 exact comparisons covered
+values, dtypes, indices, attrs and printed text, including malformed and missing
+data, huge integers, reservation aliases, and degraded Grid Engine fallbacks.
+
+```bash
+python -m benchmarks.benchmark_hotpaths
+python -m benchmarks.benchmark_hotpaths --case capture-4MiB --repeats 5 --skip-memory
+
+kfbatch_hotpath_base=$(mktemp -d)
+git archive b291889463dc240acd0aaab9b19c0b3371a11aef | tar -x -C "$kfbatch_hotpath_base"
+cp benchmarks/benchmark_hotpaths.py "$kfbatch_hotpath_base/benchmarks/"
+(
+  cd "$kfbatch_hotpath_base"
+  python -m benchmarks.benchmark_hotpaths
+)
+```
+
+The harness reuses the report benchmark's timing and checksum implementation.
+Compare the same arguments and environment across revisions. Medians below are
+seconds; allocation excludes prebuilt inputs and is not process RSS. Baseline
+and updated runs were consecutive on a shared host, without affinity or frequency
+controls. CPU time describes parser work; wall time is the useful measure for
+pipe readiness. Child-process CPU and allocations are outside the capture metric.
+
+| Operation | Before → after CPU seconds | CPU ratio | Before → after wall seconds | Before → after peak MiB |
+| --- | --- | --- | --- | --- |
+| Slurm render, 50,000 queue/node rows | 0.5571 → 0.1077 | 5.2× | 0.5876 → 0.1081 | 9.84 → 4.13 |
+| Slurm launch, same rows | 0.3271 → 0.1201 | 2.7× | 0.3312 → 0.1217 | 8.00 → 4.26 |
+| 5,000 explicit reservations | 0.0895 → 0.0192 | 4.7× | 0.0937 → 0.0196 | 2.59 → 2.60 |
+| Wildcard over 5,000 nodes | 0.0357 → 0.0122 | 2.9× | 0.0364 → 0.0122 | 2.48 → 2.48 |
+| 20,000 sshare associations | 0.2970 → 0.1680 | 1.8× | 0.3120 → 0.1730 | 12.76 → 11.88 |
+| 100,000 repeated memory tokens | 0.0878 → 0.0091 | 9.6× | 0.0880 → 0.0092 | 7.06 → 4.77 |
+| 100,000 unique memory tokens | 0.0909 → 0.0950 | — | 0.0973 → 0.0990 | 7.06 → 7.06 |
+| 100,000 pending requests | 0.3841 → 0.1662 | 2.3× | 0.3859 → 0.2013 | 49.77 → 49.78 |
+| 50,000 Grid Engine JSON jobs | 0.1437 → 0.1278 | 1.1× | 0.1438 → 0.1384 | 34.18 → 34.18 |
+| 5,000 qfree group users | 0.1833 → 0.0044 | 41.5× | 0.1847 → 0.0044 | 0.59 → 1.09 |
+| Decode 16MiB of LF output | 0.0194 → 0.0085 | 2.3× | 0.0196 → 0.0098 | 33.39 → 16.76 |
+| Grid Engine 5,000 instances × 120 resources | 0.3620 → 0.1227 | 2.9× | 0.3668 → 0.1257 | 3.63 → 3.63 |
+| Capture small child output | 0.0109 → 0.0095 | — | 0.0575 → 0.0338 | 0.34 → 0.34 |
+| Capture 4MiB child output | 0.0206 → 0.0168 | — | 0.3213 → 0.0621 | 12.00 → 12.00 |
+
+The node workload has 25,000 physical nodes, each in two distinct partitions
+distributed across five queues, retaining the topology attrs emitted by the real
+parser. Rendering and resource ceilings discard attrs only on private shallow
+working copies; original topology remains available for reservation accounting.
+This removes repeated deep copies by pandas. Reservations use per-row plain
+records and reuse wildcard targets without retaining a second full record list.
+
+Grid Engine parses embedded jobs only when the all-user query is absent or
+degraded, and validates JSON required fields once per job. qfree's seen-user set
+retains first-seen ordering at a measured cost of about 0.5MiB for 5,000 users.
+
+Repeated scalar conversions use caches of at most 256 entries, scoped to a single
+call. Memory/time columns and pending requests sample up to 128 entries across
+the input and keep small, mostly unique, or unsuitable samples on the direct
+path. Sampling is a heuristic, so unusual distributions can still cause cache
+misses. Unique memory timings overlap (CPU ranges 0.0882–0.1001 before and
+0.0894–0.0970 after); no improvement is claimed there. Small command-output wall
+ranges also overlap (0.0373–0.0615 before and 0.0311–0.0533 after).
+
+sshare retains scalar numeric conversion before its existing final column
+conversion. Bulk conversion of mixed floating-point values and huge integers
+was rejected because it changes rounding. Slurm request-memory conversion reuses
+its parsed match instead of running the same regular expression twice.
+
+POSIX capture waits for readable pipes, retaining output/line limits, deadlines,
+process-group termination and bounded cleanup for detached descendants. The
+non-POSIX capture path is retained; these measurements establish no Windows
+performance result. LF decoding streams binary lines; CR/CRLF uses the existing
+split semantics. Live schedulers and site-specific quota providers were not used.
+
+CI retains Python 3.10–3.14, minimum pandas, coverage, security, package-install
+and PR merge-ref checks. A push to a branch with an open PR at the same head
+uses that PR's validation; default-branch pushes and other branches still run.
+Routing is read-only and fails on API errors. A concurrent PR opening can still
+race routing and run both validations. Python 3.12's full suite runs once with
+coverage, and tag releases reuse the distributions built and installed by their
+own validation run. No workflow wall-time saving is claimed from local tests;
+PR routing and tag publication need their respective GitHub events to exercise
+the hosted paths.

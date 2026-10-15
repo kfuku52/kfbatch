@@ -124,8 +124,13 @@ to make a sample output look more complete.
 Update `kfbatch.__version__` and `CHANGELOG.md` in the release commit. Push an
 annotated `vX.Y.Z` tag only after the `main` checks pass. The tag workflow verifies
 that the tag and package versions match and runs the full reusable validation
-workflow before publishing distributions,
+workflow before publishing its already-built and installation-tested distributions,
 SHA-256 checksums, an SBOM, and build-provenance attestations to a GitHub release.
+The distributions stay within the same workflow run and commit; tag artifacts are
+retained for one day. After they expire, rerun validation before retrying a release.
+Branches with a matching open PR use its merge-ref validation
+instead of duplicating the suite on push. Other branch pushes retain full checks;
+Python 3.12 runs once in the quality/package job with coverage.
 
 ## Correctness invariants
 

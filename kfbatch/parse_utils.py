@@ -1,5 +1,22 @@
 """Parse utils helpers, independent of command execution."""
 
+from functools import lru_cache
+
+
+def _map_repeated_strings(series, convert):
+    """Cache repeated tokens for one conversion, with bounded memory.
+
+    Sample across the input so mostly unique columns keep the direct path.
+    Only strings enter the cache; other scalar types retain their own semantics.
+    """
+    if len(series) < 256:
+        return series.map(convert)
+    sample = series.iloc[:: max(len(series) // 128, 1)].iloc[:128].tolist()
+    if not all(isinstance(value, str) for value in sample) or len(set(sample)) > 64:
+        return series.map(convert)
+    cached = lru_cache(maxsize=256)(convert)
+    return series.map(lambda value: cached(value) if isinstance(value, str) else convert(value))
+
 
 def _numeric_task_token_count(token):
     """Return the task count represented by one numeric array token."""

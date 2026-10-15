@@ -7,6 +7,8 @@ import re
 
 import pandas
 
+from kfbatch.parse_utils import _map_repeated_strings
+
 _MIB_PER_UNIT = {
     "K": 1.0 / 1024.0,
     "M": 1.0,
@@ -43,6 +45,10 @@ def memory_text_to_mib(value, default_unit="G"):
     """
 
     match = _memory_match(value)
+    return _memory_match_to_mib(match, default_unit)
+
+
+def _memory_match_to_mib(match, default_unit):
     if match is None:
         return float("nan")
     number = float(match.group(1))
@@ -84,7 +90,9 @@ def memory_text_to_gib(value, default_unit="G"):
 
 
 def memory_series_to_gib(series, default_unit="G"):
-    return series.map(lambda value: memory_text_to_gib(value, default_unit=default_unit))
+    return _map_repeated_strings(
+        series, lambda value: memory_text_to_gib(value, default_unit=default_unit)
+    )
 
 
 def grid_engine_memory_text_to_gib(value):
@@ -95,7 +103,7 @@ def grid_engine_memory_text_to_gib(value):
 
 
 def grid_engine_memory_series_to_gib(series):
-    return series.map(grid_engine_memory_text_to_gib)
+    return _map_repeated_strings(series, grid_engine_memory_text_to_gib)
 
 
 def slurm_request_memory_gib(value, req_cpus=1, num_nodes=1):
@@ -117,7 +125,7 @@ def slurm_request_memory_gib(value, req_cpus=1, num_nodes=1):
     scope = scope_marker.lower()
     if scope == "g":
         return float("nan")
-    base_mib = memory_text_to_mib(value, default_unit="M")
+    base_mib = _memory_match_to_mib(match, default_unit="M")
     if pandas.isna(base_mib):
         return float("nan")
     if scope == "c":
