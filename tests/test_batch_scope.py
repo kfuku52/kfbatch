@@ -1,7 +1,12 @@
 import pandas
 import pytest
 
-from kfbatch.batch_scope import JobTotals, aggregate_jobs, print_group_job_summary
+from kfbatch.batch_scope import (
+    JobTotals,
+    _print_user_breakdown,
+    aggregate_jobs,
+    print_group_job_summary,
+)
 
 
 def test_aggregate_jobs_counts_slurm_slots_in_all_buckets():
@@ -35,6 +40,54 @@ def test_aggregate_uge_jobs_retains_state_precedence_over_queue_assignment():
         }
     )
     assert aggregate_jobs(frame, "uge") == JobTotals(running=6, queued=8, failed=7, other=7)
+
+
+@pytest.mark.parametrize(
+    "scheduler,states,expected",
+    [
+        (
+            "slurm",
+            ["R", "PD", "FAILED", "SUSPENDED", "R", "R"],
+            "      absent:R/Q/X/O=0/0/0/0\n"
+            "      user_a:R/Q/X/O=0/3/0/0\n"
+            "      user_b:R/Q/X/O=4/0/0/2\n",
+        ),
+        (
+            "uge",
+            ["r", "qw", "Eqw", "", "r", "r"],
+            "      absent:R/Q/F=0/0/0\n      user_a:R/Q/F=0/3/0\n      user_b:R/Q/F=4/0/0\n",
+        ),
+    ],
+)
+def test_user_breakdown_retains_members_order_and_slot_validation(
+    scheduler, states, expected, capsys
+):
+    frame = pandas.DataFrame(
+        {
+            "user": ["user_b", "user_a", "user_a", "user_b", None, ""],
+            "state": states,
+            "queue_name": [""] * 6,
+            "total_slots": [4, "3", -7, 2, float("inf"), float("inf")],
+        },
+        index=[9, 9, 1, 2, 2, 4],
+    )
+    _print_user_breakdown(frame, scheduler, ["absent", "user_b", ""])
+    assert capsys.readouterr().out == expected
+
+
+@pytest.mark.parametrize("missing", ["state", "queue_name", "total_slots"])
+def test_user_breakdown_keeps_users_when_job_columns_are_missing(missing, capsys):
+    frame = pandas.DataFrame(
+        {"user": ["user_b", "user_a"], "state": ["r", "qw"], "queue_name": ["", ""]}
+    )
+    frame["total_slots"] = [4, 3]
+    _print_user_breakdown(frame.drop(columns=missing), "uge", ["absent"])
+    expected = (
+        "      absent:R/Q/F=0/0/0\n"
+        f"      user_a:R/Q/F=0/{0 if missing in {'state', 'total_slots'} else 3}/0\n"
+        f"      user_b:R/Q/F={0 if missing in {'state', 'total_slots'} else 4}/0/0\n"
+    )
+    assert capsys.readouterr().out == expected
 
 
 def test_slurm_group_summary_discovers_account_and_breaks_down_users(capsys):

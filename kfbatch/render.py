@@ -75,11 +75,15 @@ def _format_slurm_compact_node(node_name, ncore_available, mem_gb):
 def _format_compact_top_nodes(df_nodes, primary_col, secondary_col, args):
     if df_nodes.shape[0] == 0:
         return "-"
-    ordered = df_nodes.sort_values(
+    ntop = max(int(getattr(args, "ntop", 1)), 1)
+    candidates = df_nodes
+    if df_nodes.shape[0] > max(ntop, 1000) and df_nodes[primary_col].dtype.kind in "biuf":
+        # Preserve every primary-metric tie before applying the secondary/name order.
+        candidates = df_nodes.nlargest(ntop, primary_col, keep="all")
+    ordered = candidates.sort_values(
         by=[primary_col, secondary_col, "node_name"],
         ascending=[False, False, True],
     ).reset_index(drop=True)
-    ntop = max(int(getattr(args, "ntop", 1)), 1)
     limit = min(ntop, ordered.shape[0])
     if getattr(args, "all_tiers", False):
         threshold = ordered.at[limit - 1, primary_col]
@@ -161,9 +165,10 @@ def print_slurm_compact_summary(df, df_launch, args):
         for i in df_launch.index:
             queue_name = df_launch.at[i, "queue_name"]
             launch_rows[queue_name] = df_launch.loc[i, :].to_dict()
+    queue_indices = df.groupby("queue_name", sort=False, observed=True).indices
     rows = []
     for queue_name in queue_names:
-        df_queue = df.loc[(df["queue_name"] == queue_name), :].reset_index(drop=True)
+        df_queue = df.take(queue_indices.get(queue_name, [])).reset_index(drop=True)
         is_abnormal_status = df_queue["status"] != ""
         num_abnormal_node = int(is_abnormal_status.sum())
         num_node = int(df_queue.shape[0])
@@ -238,9 +243,10 @@ def print_uge_compact_summary(df, df_qfree, args):
         queue_names.extend(queue for queue in qfree_queue_names if queue not in queue_names)
         for i in df_qfree.index:
             qfree_rows[str(df_qfree.at[i, "queue_name"])] = df_qfree.loc[i, :].to_dict()
+    queue_indices = df.groupby("queue_name", sort=False, observed=True).indices
     rows = []
     for queue_name in queue_names:
-        df_queue = df.loc[(df["queue_name"] == queue_name), :].reset_index(drop=True)
+        df_queue = df.take(queue_indices.get(queue_name, [])).reset_index(drop=True)
         if df_queue.shape[0] > 0:
             is_abnormal_status = df_queue["status"] != ""
             num_abnormal_node = int(is_abnormal_status.sum())

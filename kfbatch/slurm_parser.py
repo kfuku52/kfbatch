@@ -212,6 +212,11 @@ def _parse_squeue_row_items(items, rest_separator, text_cache):
 def get_squeue_user_df(lines):
     table = []
     text_cache: dict[str, str] = {}
+
+    @lru_cache(maxsize=256)
+    def valid_request_memory(value):
+        return not pandas.isna(memory_text_to_mib(value, default_unit="M"))
+
     input_nonempty = False
     recognized_header = False
     candidate_rows = 0
@@ -258,7 +263,7 @@ def get_squeue_user_df(lines):
             if (
                 not str(req_cpus_txt).isdigit()
                 or int(req_cpus_txt) < 1
-                or pandas.isna(memory_text_to_mib(req_mem, default_unit="M"))
+                or not valid_request_memory(req_mem)
             ):
                 rejected_rows += 1
                 continue

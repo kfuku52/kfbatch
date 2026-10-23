@@ -16,6 +16,28 @@ class JobTotals:
     other: int = 0
 
 
+def _job_bucket_getter(scheduler, row_count):
+    """Reuse pure string states within this report, with a bounded vocabulary."""
+    is_slurm = scheduler == "slurm"
+    cache: dict[str, str] | None = {} if row_count >= 128 else None
+
+    def classify(state, queue):
+        nonlocal cache
+        if cache is None or type(state) is not str or (not is_slurm and type(queue) is not str):
+            return _slurm_bucket(state) if is_slurm else _uge_bucket(state, queue)
+        bucket = cache.get(state)
+        if bucket is None:
+            bucket = _slurm_bucket(state) if is_slurm else _uge_bucket(state, "")
+            if len(cache) < 128:
+                cache[state] = bucket
+            else:
+                cache = None
+        # An assigned queue changes only an otherwise unclassified UGE state.
+        return "running" if not is_slurm and bucket == "other" and queue.strip() else bucket
+
+    return classify
+
+
 def aggregate_jobs(frame, scheduler):
     counts = {"running": 0, "queued": 0, "failed": 0, "other": 0}
     if frame is None or frame.shape[0] == 0:
@@ -23,11 +45,9 @@ def aggregate_jobs(frame, scheduler):
     states = frame.get("state", repeat("", len(frame)))
     queues = frame.get("queue_name", repeat("", len(frame)))
     slot_counts = frame.get("total_slots", repeat(0, len(frame)))
+    classify = _job_bucket_getter(scheduler, len(frame))
     for state, queue, value in zip(states, queues, slot_counts, strict=True):
-        if scheduler == "slurm":
-            bucket = _slurm_bucket(state)
-        else:
-            bucket = _uge_bucket(state, queue)
+        bucket = classify(state, queue)
         try:
             slots = int(value)
         except (TypeError, ValueError):
@@ -47,14 +67,29 @@ def _print_totals(label, totals, scheduler):
 
 def _print_user_breakdown(frame, scheduler, users=None):
     known_users = set(users or [])
-    totals_by_user = {}
+    totals_by_user: dict[str, dict[str, int]] = {}
     if frame is not None and "user" in frame.columns:
-        for user, user_frame in frame.groupby(frame["user"].fillna("").astype(str), sort=False):
-            if user:
-                known_users.add(user)
-                totals_by_user[user] = aggregate_jobs(user_frame, scheduler)
+        # Retain first-seen user evaluation order without copying all job columns.
+        user_indices = frame.groupby(frame["user"].fillna("").astype(str), sort=False).indices
+        states = list(frame.get("state", repeat("", len(frame))))
+        queues = list(frame.get("queue_name", repeat("", len(frame))))
+        slot_counts = list(frame.get("total_slots", repeat(0, len(frame))))
+        classify = _job_bucket_getter(scheduler, len(frame))
+        for user, positions in user_indices.items():
+            if not user:
+                continue
+            counts = {"running": 0, "queued": 0, "failed": 0, "other": 0}
+            totals_by_user[user] = counts
+            for position in positions:
+                bucket = classify(states[position], queues[position])
+                try:
+                    slots = int(slot_counts[position])
+                except (TypeError, ValueError):
+                    slots = 0
+                counts[bucket] += max(slots, 0)
+        known_users.update(totals_by_user)
     for user in sorted(user for user in known_users if user):
-        totals = totals_by_user.get(user, JobTotals())
+        totals = JobTotals(**totals_by_user[user]) if user in totals_by_user else JobTotals()
         if scheduler == "slurm":
             print(
                 f"      {user}:R/Q/X/O="

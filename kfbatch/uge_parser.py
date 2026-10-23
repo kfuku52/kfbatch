@@ -2,6 +2,7 @@
 
 import json
 import re
+from functools import lru_cache
 from typing import Any
 
 import pandas
@@ -113,8 +114,8 @@ def get_qstat_df(lines):
         if line.startswith("\t"):
             if node is None:
                 continue
-            key, separator, value = line[1:].partition("=")
-            if separator and key in {"hc:mem_req", "hl:mem_total"}:
+            if line.startswith(("\thc:mem_req=", "\thl:mem_total=")):
+                key, _, value = line[1:].partition("=")
                 node[key] = value
             continue
         append_node()
@@ -264,7 +265,7 @@ def _empty_uge_job_df():
     return pandas.DataFrame(columns=UGE_JOB_COLUMNS)
 
 
-def _parse_uge_text_job_line(line, text_cache):
+def _parse_uge_text_job_line(line, text_cache, parse_task_expression=_parse_uge_task_expression):
     items = str(line).split()
     if len(items) < 8 or not items[0].isdigit():
         return None
@@ -281,7 +282,7 @@ def _parse_uge_text_job_line(line, text_cache):
     slots = int(items[tail_index])
     tail_index += 1
     ja_task_id = items[tail_index] if tail_index < len(items) else ""
-    num_tasks, task_count_estimated = _parse_uge_task_expression(ja_task_id)
+    num_tasks, task_count_estimated = parse_task_expression(ja_task_id)
     reuse = text_cache.setdefault
     return (
         items[0],
@@ -300,6 +301,7 @@ def _parse_uge_text_job_line(line, text_cache):
 
 
 def get_user_df(lines):
+    parse_task_expression = lru_cache(maxsize=256)(_parse_uge_task_expression)
     rows = []
     text_cache: dict[str, str] = {}
     input_nonempty = False
@@ -313,12 +315,10 @@ def get_user_df(lines):
         if stripped.lower().startswith("job-id"):
             recognized_header = True
             continue
-        if not stripped or set(stripped) <= {"-"}:
-            continue
         if not stripped[:1].isdigit():
             continue
         candidate_rows += 1
-        row = _parse_uge_text_job_line(text, text_cache)
+        row = _parse_uge_text_job_line(text, text_cache, parse_task_expression)
         if row is not None:
             rows.append(row)
     if not rows:

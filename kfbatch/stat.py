@@ -1316,10 +1316,10 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=""
             if not str(q).startswith("login")
         ]
     )
+    queue_indices = df_node.groupby("queue_name", sort=False, observed=True).indices
     for queue_name in queue_names:
-        df_queue = df_node.loc[
-            (df_node["queue_name"] == queue_name) & (df_node["status"] == ""), :
-        ].copy()
+        df_queue = df_node.iloc[queue_indices[queue_name], :]
+        df_queue = df_queue.loc[df_queue["status"] == "", :].copy()
         if df_queue.shape[0] == 0:
             rows.append(
                 {

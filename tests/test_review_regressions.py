@@ -184,6 +184,30 @@ def test_uge_job_indentation_does_not_change_count(indent, job_id):
     assert frame.attrs["parse_quality"]["rejected_rows"] == 0
 
 
+@pytest.mark.parametrize("job_id", ["1", "١", "１", "²"])
+def test_uge_job_row_filter_preserves_quality_with_noise_and_unicode_digits(job_id):
+    frame = stat.get_user_df(
+        iter(
+            [
+                "",
+                " \t ",
+                "  ----  ",
+                "JOB-ID prior name user state submit/start at queue slots ja-task-ID",
+                "synthetic scheduler warning",
+                "12 malformed",
+                f"\t{job_id} 0.5 job current_user qw 09/22/2026 00:00:00 2 1-10",
+            ]
+        )
+    )
+    assert frame["job_id"].tolist() == [job_id]
+    assert frame["total_slots"].tolist() == [20]
+    assert frame.attrs["input_nonempty"] is True
+    assert frame.attrs["recognized_header"] is True
+    assert frame.attrs["candidate_rows"] == 2
+    assert frame.attrs["parse_quality"]["recognized_rows"] == 1
+    assert frame.attrs["parse_quality"]["rejected_rows"] == 1
+
+
 @pytest.mark.parametrize("state,code", SLURM_STATE_NAME_TO_CODE.items())
 def test_slurm_state_aliases_and_total_conservation(state, code, capsys):
     assert slurm_bucket(state) == slurm_bucket(code)
@@ -512,6 +536,26 @@ def test_additional_snapshots_never_increase_memory(first, second):
         after = grid_engine_memory_text_to_gib(frame.at[0, "hc:mem_req"])
         assert after <= before
         assert after <= grid_engine_memory_text_to_gib(second)
+
+
+def test_repeated_squeue_memory_validation_preserves_rejected_rows():
+    memories = ["2Gc", "NA", "2Gn", "2GiB", "9" * 400 + "P", "0M", "2"]
+    memories = memories + [f"{index}M" for index in range(300)] + memories
+    lines = [
+        f"{index}\tmain\tjob\tcurrent_user\taccount_a\tPD\t0:00\t1\t1\t{value}\t1:00:00\t(Priority)"
+        for index, value in enumerate(memories)
+    ]
+
+    frame = stat.get_squeue_user_df(lines)
+
+    invalid = {"NA", "2GiB", "9" * 400 + "P"}
+    accepted = [index for index, value in enumerate(memories) if value not in invalid]
+    assert frame["job_id"].tolist() == [str(index) for index in accepted]
+    assert frame["req_mem"].tolist() == [memories[index] for index in accepted]
+    assert frame.attrs["candidate_rows"] == len(lines)
+    assert frame.attrs["recognized_rows"] == len(accepted)
+    assert frame.attrs["rejected_rows"] == 6
+    assert frame.attrs["parse_quality"]["rejected_rows"] == 6
 
 
 def test_partial_squeue_output_fails_before_printing_totals(monkeypatch, capsys):

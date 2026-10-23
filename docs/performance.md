@@ -211,3 +211,118 @@ coverage, and tag releases reuse the distributions built and installed by their
 own validation run. No workflow wall-time saving is claimed from local tests;
 PR routing and tag publication need their respective GitHub events to exercise
 the hosted paths.
+
+
+## 2026-10-23 local follow-up audit
+
+Baseline: `d10f6daf8d861bfcd68968f0a6e8d01140a95a31` (0.4.15). Ten
+proposals were evaluated by ten separate subagents in isolated synthetic source
+copies. Nine were adopted; the key/value parser change was rejected. Two
+independent follow-up reviews covered the combined state aggregation and node
+rendering changes before integration.
+
+| # | Proposal | Decision and final implementation |
+| --- | --- | --- |
+| 1 | Avoid per-user job DataFrames | Adopt with #2. Group positional indices once and scan only state, queue and slot columns; retain first-seen user evaluation order and sorted display. |
+| 2 | Reuse job-state classification | Adopt. Shared per-report classifier caches at most 128 built-in string states, stops caching a diverse vocabulary, and leaves non-string conversion on the original path. UGE queue assignment changes only an otherwise unclassified state. |
+| 3 | Avoid repeated queue scans in rendering | Adopt. Build queue indices once; preserve input queue order, missing values, categorical keys and qfree-only queues. |
+| 4 | Avoid sorting every node for a small top list | Adopt. For numeric primary columns above 1,000 rows, select candidates with `nlargest(keep="all")`, then apply the existing secondary/name ordering. Small/object inputs retain their existing sort. |
+| 5 | Avoid repeated queue scans in launch ceilings | Adopt. Index queue rows once and filter normal nodes inside each queue; retain node sorting and CPU/RAM-only semantics. |
+| 6 | Reuse Slurm request-memory validation | Adopt. A parser-call-local LRU caches up to 256 validation results, including invalid tokens. |
+| 7 | Remove redundant Grid Engine job-line checks | Adopt. The numeric-first-character check already excludes empty and separator lines, so it no longer builds a character set for every job. |
+| 8 | Replace key/value `split` with `partition` | Reject. Micro CPU improved 8–10%, but ordinary 50,000-node parsing changed from an initial 7.4% gain to a 3.8% regression on confirmation. No reliable overall benefit was established. |
+| 9 | Reuse repeated job-array range counts | Adopt for UGE text only, with a parser-call-local LRU of at most 256 expressions. Slurm and UGE JSON paths are unchanged. |
+| 10 | Skip unused Grid Engine resource fields earlier | Adopt. Only the exact two memory-field prefixes are split into keys and values; whitespace and malformed keys retain their original treatment. |
+
+Final measurements used Python 3.14.7, pandas 3.1.0, macOS 27.0.1 arm64.
+All inputs were synthetic and constructed before timing. Each operation was
+warmed once and timed seven times; Python allocation peaks were traced in
+separate invocations. Candidate benchmarks ran sequentially after subagent
+measurements stopped. The shared host still had substantial external load;
+there was no CPU affinity or frequency control. CPU medians are the primary
+comparison, and wall medians below do not establish consistent wall-time gains.
+
+Default inputs are 100,000 jobs across 2,000 users, 50,000 queue/node instances
+across 100 queues, and 5,000 Grid Engine instances with 120 unused resource
+fields each. Physical node aliases use distinct queue keys and matching capacity.
+The top-node case uses 50,000 distinct physical nodes in one queue. One-user,
+unique-memory, unique-array and non-array cases expose unfavorable distributions.
+The node and per-user cases were rerun after final workload/order refinements;
+unchanged operations retain their seven-sample measurements.
+
+CPU and wall values are seconds. CPU brackets show the min–max of seven samples.
+
+| Operation | Before CPU [range] | After CPU [range] | CPU ratio | Wall median before → after |
+| --- | --- | --- | --- | --- |
+| users-slurm | 0.238675 [0.217381–0.248347] | 0.058885 [0.056100–0.065761] | 4.05× | 0.735321 → 0.067551 |
+| users-uge | 0.205453 [0.190840–0.224376] | 0.063038 [0.056897–0.069879] | 3.26× | 0.488571 → 0.068278 |
+| one-user-slurm | 0.093284 [0.086412–0.108948] | 0.058740 [0.050416–0.065046] | 1.59× | 0.134855 → 0.063571 |
+| one-user-uge | 0.077951 [0.072560–0.084941] | 0.058899 [0.053275–0.063204] | 1.32× | 0.171371 → 0.061914 |
+| totals-slurm | 0.086068 [0.080906–0.091344] | 0.043759 [0.040283–0.045825] | 1.97× | 0.262397 → 0.060961 |
+| totals-uge | 0.068147 [0.063252–0.077016] | 0.044766 [0.042480–0.046881] | 1.52× | 0.130501 → 0.052865 |
+| render-slurm | 0.412112 [0.382628–0.419059] | 0.263432 [0.243532–0.301649] | 1.56× | 0.546795 → 1.100500 |
+| render-uge | 0.434138 [0.399779–0.464886] | 0.251580 [0.241424–0.298582] | 1.73× | 0.781715 → 0.920466 |
+| top-nodes | 0.028832 [0.024740–0.033477] | 0.001907 [0.001756–0.002704] | 15.12× | 0.100983 → 0.001911 |
+| launch-queues | 0.498607 [0.462476–0.528334] | 0.229896 [0.199944–0.292050] | 2.17× | 1.241463 → 0.531729 |
+| squeue-repeated | 0.350475 [0.335988–0.385858] | 0.256270 [0.252925–0.286800] | 1.37× | 0.726811 → 0.701297 |
+| squeue-unique | 0.386453 [0.374661–0.401542] | 0.410633 [0.377697–0.431111] | 0.94× | 0.534739 → 0.517731 |
+| uge-array-repeated | 0.241450 [0.232763–0.248691] | 0.135501 [0.126878–0.150987] | 1.78× | 0.345165 → 0.203941 |
+| uge-array-unique | 0.238749 [0.235109–0.270594] | 0.176469 [0.172355–0.185420] | 1.35× | 0.361835 → 0.190738 |
+| uge-no-array | 0.180999 [0.171169–0.210019] | 0.115415 [0.112285–0.121486] | 1.57× | 0.275319 → 0.131637 |
+| qstat-resources | 0.133816 [0.124910–0.142133] | 0.054901 [0.053977–0.068855] | 2.44× | 0.165692 → 0.059609 |
+
+All 16 final before/after checksums matched, including summary text and DataFrame
+values, indices, column order, dtypes and attrs. Independent combined reviews
+compared 1,468 aggregation cases and 336 full-render cases. An evaluation-order
+difference for stateful scalar objects was fixed by retaining grouped positional
+iteration; regression tests cover state, queue and slot conversions. Individual
+proposal comparisons also covered missing fields, malformed tokens, array
+estimates, unknown memory, queue-only rows and reservation topology preservation.
+
+| Operation | Before peak Python allocation | After |
+| --- | --- | --- |
+| users-slurm | 16.50MiB | 4.71MiB |
+| render-slurm | 1.90MiB | 2.29MiB |
+| top-nodes | 6.98MiB | 0.78MiB |
+| launch-queues | 1.90MiB | 2.29MiB |
+| uge-array-repeated | 56.73MiB | 56.73MiB |
+
+Peaks exclude prebuilt inputs and are not process RSS. Queue indices cost about
+0.39 MiB for 50,000 rows in these render/launch cases. The unique Slurm-memory
+case has a 6.3% higher CPU median, with overlapping sample ranges; the bounded
+cache trades miss overhead for the repeated-token improvement. On the final
+100-row/5-queue small workload, launch CPU increased from 4.62 to 5.59 ms;
+Slurm/UGE aggregate totals increased by about 12/22 microseconds. Small workloads
+are not uniformly faster. All-primary-tied top-node
+inputs showed little benefit (about 1.4% extra CPU in screening), and
+`all_tiers` still formats every selected tie. No improvement is claimed for these
+unfavorable cases or for live scheduler response time.
+
+Reproduce from CONTRIBUTING's activated environment at the repository root:
+
+```bash
+python -m benchmarks.benchmark_followup --repeats 7 --skip-memory
+python -m benchmarks.benchmark_followup --case users-slurm --case render-slurm --case top-nodes --case launch-queues --case uge-array-repeated --repeats 1
+
+kfbatch_followup_base=$(mktemp -d)
+git archive d10f6daf8d861bfcd68968f0a6e8d01140a95a31 | tar -x -C "$kfbatch_followup_base"
+cp benchmarks/benchmark_followup.py "$kfbatch_followup_base/benchmarks/"
+(
+  cd "$kfbatch_followup_base"
+  python -m benchmarks.benchmark_followup --repeats 7 --skip-memory
+)
+```
+
+Use identical arguments and the same interpreter/dependencies at both revisions;
+compare checksums as well as timings. For small inputs, use `--jobs 100 --users 5
+--nodes 100 --queues 5 --qstat-nodes 10`. Fixtures, site defaults, units, CLI/TSV
+schemas, scheduler queries and command-capture safeguards were not changed.
+This audit makes no CI-runtime claim. The full interpreter/minimum-pandas matrix,
+live schedulers, SSH wrappers and site-specific quota providers were not exercised.
+
+Local verification: `python -m pytest --cov=kfbatch --cov-branch` passed all 386
+tests with 87.40% branch-inclusive coverage. Static checks (`ruff check`,
+`ruff format --check`, `mypy`, and `bandit`) passed. The small-input benchmark
+also matched all 16 before/after checksums. Package builds and network dependency
+audits were outside this local-only change; no version bump or publication was
+performed.

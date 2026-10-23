@@ -900,6 +900,35 @@ def test_multi_partition_priority_blocked_job_keeps_resource_ceiling():
     assert int(out.at[0, "top_node_cores"]) == 67
 
 
+@pytest.mark.parametrize("queue_dtype", ["object", "string", "category"])
+def test_slurm_launch_groups_only_normal_nodes_in_each_visible_queue(queue_dtype):
+    nodes = pandas.DataFrame(
+        {
+            "queue_name": ["short", "main", "main", "dead", "login01", None, "main"],
+            "node_name": ["short01", "main01", "main02", "dead01", "login01", "unknown", "bad"],
+            "status": ["", "", "", "DOWN", "", "", "DOWN"],
+            "ncore_available": [4, 8, 8, 64, 128, 128, 128],
+            "hc:mem_req": ["16G", "32G", "64G", "128G", "256G", "256G", "256G"],
+        },
+        index=[8, 2, 2, 4, 9, 3, 5],
+    )
+    nodes["queue_name"] = nodes["queue_name"].astype(queue_dtype)
+    if queue_dtype == "category":
+        nodes["queue_name"] = nodes["queue_name"].cat.add_categories(["unused"])
+    nodes.attrs = {"slurm_cpus_per_core": {"main01": 2, "main02": 1}}
+    original = nodes.copy(deep=True)
+
+    result = get_slurm_launch_heuristic_df(nodes, None)
+
+    assert result["queue_name"].tolist() == ["dead", "main", "short"]
+    assert result["top_node_name"].tolist() == ["", "main02", "short01"]
+    assert result["recommended_cores"].tolist() == [0, 8, 4]
+    assert result["recommended_mem_gib"].tolist() == [0.0, 64.0, 16.0]
+    assert result["status"].tolist() == ["no_normal_nodes", "resource_only", "resource_only"]
+    pandas.testing.assert_frame_equal(nodes, original, check_exact=True)
+    assert nodes.attrs == original.attrs
+
+
 def test_squeue_unsuffixed_memory_is_not_treated_as_per_node():
     df_job = get_squeue_user_df(
         ["2002\tepyc\tanalysis\tcurrent_user\taccount_a\tPD\t0:00\t1\t8\t2G\t00:05:00\t(Priority)"]
@@ -1076,6 +1105,52 @@ def test_get_qstat_df_parses_final_node_from_iterator_and_ignores_noise():
     assert int(df.at[0, "ncore_available"]) == 1
     assert df.at[0, "hc:mem_req"] == "4.000G"
     assert "hl:unused_large_resource" not in df.columns
+
+
+@pytest.mark.parametrize(
+    "resource_line",
+    [
+        "\thc:mem_req =99G",
+        "\t hc:mem_req=99G",
+        "\t\thc:mem_req=99G",
+        "\thc:mem_req_extra=99G",
+        "\thc:mem_req",
+        "\thl:mem_total =99G",
+        "\t hl:mem_total=99G",
+        "\t\thl:mem_total=99G",
+        "\thl:mem_total_extra=99G",
+        "\thl:mem_total",
+    ],
+)
+def test_get_qstat_df_requires_exact_memory_resource_keys(resource_line):
+    df = get_qstat_df(
+        iter(
+            [
+                "epyc.q@node01 BP 0/1/2 0.10 lx-amd64",
+                "\thc:mem_req=4G",
+                "\thl:mem_total=8G",
+                resource_line,
+            ]
+        )
+    )
+    assert df.at[0, "hc:mem_req"] == "4G"
+    assert df.at[0, "hl:mem_total"] == "8G"
+
+
+def test_get_qstat_df_preserves_last_memory_value_and_embedded_equals():
+    df = get_qstat_df(
+        [
+            "epyc.q@node01 BP 0/1/2 0.10 lx-amd64",
+            "\thc:mem_req=4G",
+            "\thc:mem_req= unknown=value \r\n",
+            "\thl:mem_total=8G",
+            "\thl:mem_total= \r\n",
+        ]
+    )
+    assert df.at[0, "hc:mem_req"] == "unknown=value"
+    assert bool(df.at[0, "hc:mem_req_known"]) is True
+    assert pandas.isna(df.at[0, "hl:mem_total"])
+    assert bool(df.at[0, "hl:mem_total_known"]) is False
 
 
 def test_adjust_ram_unit_converts_memory_to_binary_gib_consistently():
@@ -1285,6 +1360,63 @@ def test_all_tiers_keeps_requested_rows_when_primary_metric_is_unknown():
         SimpleNamespace(ntop=1, all_tiers=True),
     )
     assert text.startswith("n1 8c/?GiB")
+
+
+@pytest.mark.parametrize("dtype", ["int64", "float64", "Int64", "Float64", "object"])
+@pytest.mark.parametrize(
+    ("ntop", "all_tiers", "expected"),
+    [
+        (1, False, "node10 8c/64GiB"),
+        (2, False, "node10 8c/64GiB, node2 8c/64GiB"),
+        (1, True, "node10 8c/64GiB, node2 8c/64GiB, node1 4c/64GiB"),
+    ],
+)
+def test_compact_top_nodes_preserves_large_frame_ties_and_name_order(
+    dtype, ntop, all_tiers, expected
+):
+    df = pandas.DataFrame(
+        {
+            "node_name": ["node2", "node10", "node1"] + ["filler"] * 1100,
+            "ncore_available": [8, 8, 4] + [0] * 1100,
+            "hc:mem_req": pandas.Series([64, 64, 64] + [0] * 1100, dtype=dtype),
+        }
+    )
+    df.index = [0] * len(df)
+    original = df.copy(deep=True)
+
+    assert (
+        stat_module._format_compact_top_nodes(
+            df,
+            "hc:mem_req",
+            "ncore_available",
+            SimpleNamespace(ntop=ntop, all_tiers=all_tiers),
+        )
+        == expected
+    )
+    pandas.testing.assert_frame_equal(df, original)
+
+
+@pytest.mark.parametrize("valid_memory", [False, True])
+def test_compact_top_nodes_large_frame_unknown_boundary(valid_memory):
+    df = pandas.DataFrame(
+        {
+            "node_name": ["node2", "node10", "node1"] + ["filler"] * 1100,
+            "ncore_available": [8, 8, 4] + [0] * 1100,
+            "hc:mem_req": [float("nan")] * 1103,
+        }
+    )
+    if valid_memory:
+        df.loc[2, "hc:mem_req"] = 64
+    expected = "node1 4c/64GiB, node10 8c/?GiB" if valid_memory else "node10 8c/?GiB, node2 8c/?GiB"
+    assert (
+        stat_module._format_compact_top_nodes(
+            df,
+            "hc:mem_req",
+            "ncore_available",
+            SimpleNamespace(ntop=2, all_tiers=True),
+        )
+        == expected
+    )
 
 
 def test_atomic_write_tsv_preserves_existing_permissions(tmp_path):
