@@ -822,3 +822,155 @@ def test_uge_memory_only_qfree_does_not_imply_zero_running_jobs(capsys):
         stat.get_user_df([]), scheduler="uge", current_user="current_user", qfree_frame=qfree
     )
     assert "group[group_a]:R/Q/F=?/?/?" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("partition_dtype", ["object", "string"])
+@pytest.mark.parametrize("row_count", [25, 1024])
+def test_slurm_partition_index_reuse_keeps_rows_and_metadata(partition_dtype, row_count):
+    tokens = ["q0,q1", " q1* ,q0,q1", "", "(null),N/A", "q2**,,q0"]
+    frame = pandas.DataFrame(
+        {
+            "partition": pandas.Series(
+                [tokens[i % len(tokens)] for i in range(row_count)], dtype=partition_dtype
+            ),
+            "job_id": pandas.Series(range(row_count), dtype="Int64"),
+            "state": pandas.Series(["PD"] * row_count, dtype="string"),
+        }
+    )
+    frame.index = pandas.Index([i // 2 for i in reversed(range(row_count))], name="source")
+    frame.attrs = {"synthetic": {"complete": True}}
+    original = frame.copy(deep=True)
+    expanded = frame.copy()
+    expanded["_queue_name"] = expanded["partition"].map(stat._split_slurm_partition_field)
+    expanded = expanded.explode("_queue_name")
+    expanded = expanded.loc[expanded["_queue_name"].notna(), :]
+    expected = {
+        str(queue): rows.drop(columns=["_queue_name"]).reset_index(drop=True)
+        for queue, rows in expanded.groupby("_queue_name", sort=False)
+    }
+
+    actual = stat._index_slurm_rows_by_partition(frame)
+
+    assert list(actual) == list(expected)
+    for queue in expected:
+        pandas.testing.assert_frame_equal(actual[queue], expected[queue], check_exact=True)
+        assert actual[queue].attrs == expected[queue].attrs
+    pandas.testing.assert_frame_equal(frame, original, check_exact=True)
+    assert frame.attrs == original.attrs
+
+
+def test_slurm_partition_index_reuse_bypasses_nonstring_and_string_subclass_values():
+    class StatefulPartition(str):
+        calls = 0
+
+        def __str__(self):
+            self.calls += 1
+            return f"q{self.calls}"
+
+    token = StatefulPartition("q0")
+    values = ["q0"] * 1024
+    values[-7:] = [None, False, 7, float("nan"), [], token, token]
+    frame = pandas.DataFrame({"partition": values, "job_id": range(len(values))})
+    expected_queues = [stat._split_slurm_partition_field(value) for value in values]
+    token.calls = 0
+
+    actual = stat._index_slurm_rows_by_partition(frame)
+
+    assert token.calls == 2
+    assert list(actual) == ["q0", "7", "nan", "q1", "q2"]
+    for queue, rows in actual.items():
+        assert rows["job_id"].tolist() == [
+            i for i, queues in enumerate(expected_queues) for name in queues if name == queue
+        ]
+    frame.iloc[-1, frame.columns.get_loc("partition")] = pandas.NA
+    with pytest.raises(TypeError, match="boolean value of NA is ambiguous"):
+        stat._index_slurm_rows_by_partition(frame)
+
+
+@pytest.mark.parametrize("state_dtype", ["object", "string"])
+@pytest.mark.parametrize("row_count", [25, 1024])
+def test_slurm_state_reuse_preserves_report_outputs(state_dtype, row_count, monkeypatch, capsys):
+    tokens = ["R", "RUNNING", "PD", "PENDING", " COMPLETING+ ", "FAILED", "ZZZ", None, pandas.NA]
+    jobs = pandas.DataFrame(
+        {
+            "job_id": [str(i) for i in range(row_count)],
+            "state": pandas.Series(
+                [tokens[i % len(tokens)] for i in range(row_count)], dtype=state_dtype
+            ),
+            "partition": ["q0"] * row_count,
+            "user": ["current_user"] * row_count,
+            "account": ["account_a"] * row_count,
+            "total_slots": [i % 7 + 1 for i in range(row_count)],
+            "task_count_estimated": [False] * row_count,
+            "pending_reason": ["Resources"] * row_count,
+        }
+    )
+    jobs.index = pandas.Index([i // 2 for i in reversed(range(row_count))], name="source")
+    jobs.attrs = {"synthetic": {"complete": True}}
+    original = jobs.copy(deep=True)
+    shares = pandas.DataFrame(
+        {"account": ["account_a"], "user": ["current_user"], "fairshare": [0.5]}
+    )
+    nodes = pandas.DataFrame(
+        {
+            "queue_name": ["q0"],
+            "node_name": ["node01"],
+            "status": [""],
+            "ncore_available": [8],
+            "hc:mem_req": ["32G"],
+        }
+    )
+
+    def report():
+        stat.print_queued_job_summary(jobs, scheduler="slurm", current_user="current_user")
+        stdout = capsys.readouterr().out
+        fairshare = stat.get_slurm_fairshare_rank_summary(jobs, shares, current_user="current_user")
+        launch = stat.get_slurm_launch_heuristic_df(nodes, jobs, current_user="current_user")
+        return stdout, fairshare, launch
+
+    with monkeypatch.context() as direct:
+        direct.setattr(
+            stat, "_map_repeated_strings", lambda series, convert, **kwargs: series.map(convert)
+        )
+        expected_stdout, expected_fairshare, expected_launch = report()
+    stdout, fairshare, launch = report()
+
+    assert stdout == expected_stdout
+    assert fairshare == expected_fairshare
+    pandas.testing.assert_frame_equal(launch, expected_launch, check_exact=True)
+    assert launch.attrs == expected_launch.attrs
+    pandas.testing.assert_frame_equal(jobs, original, check_exact=True)
+    assert jobs.attrs == original.attrs
+
+
+def test_slurm_state_reuse_keeps_nonstring_and_string_subclass_conversion(monkeypatch, capsys):
+    class StatefulState(str):
+        calls = 0
+
+        def __str__(self):
+            self.calls += 1
+            return "PD" if self.calls % 2 else "R"
+
+    token = StatefulState("PD")
+    values = ["PD"] * 1024
+    values[-8:] = [None, False, 7, float("nan"), [], pandas.NA, token, token]
+    jobs = pandas.DataFrame(
+        {
+            "state": values,
+            "total_slots": [1] * len(values),
+            "task_count_estimated": [False] * len(values),
+        }
+    )
+    with monkeypatch.context() as direct:
+        direct.setattr(
+            stat, "_map_repeated_strings", lambda series, convert, **kwargs: series.map(convert)
+        )
+        stat.print_queued_job_summary(jobs, scheduler="slurm")
+        expected = capsys.readouterr().out
+    assert token.calls == 2
+    token.calls = 0
+
+    stat.print_queued_job_summary(jobs, scheduler="slurm")
+
+    assert token.calls == 2
+    assert capsys.readouterr().out == expected

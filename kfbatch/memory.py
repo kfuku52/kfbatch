@@ -23,6 +23,7 @@ _DECIMAL_BYTES_PER_UNIT = {
     "t": 1000.0**4,
     "p": 1000.0**5,
 }
+_MEMORY_PATTERN = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPkmgtp])?([cngCNG])?")
 
 
 def _memory_match(value):
@@ -31,10 +32,7 @@ def _memory_match(value):
     text = str(value).strip()
     if not text:
         return None
-    return re.fullmatch(
-        r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPkmgtp])?([cngCNG])?",
-        text,
-    )
+    return _MEMORY_PATTERN.fullmatch(text)
 
 
 def memory_text_to_mib(value, default_unit="G"):

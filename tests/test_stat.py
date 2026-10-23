@@ -1419,6 +1419,71 @@ def test_compact_top_nodes_large_frame_unknown_boundary(valid_memory):
     )
 
 
+@pytest.mark.parametrize("name_dtype", ["int64", "float64", "Int64", "string", "object"])
+@pytest.mark.parametrize("extra_object_column", [False, True])
+def test_compact_top_nodes_preserves_iterrows_numeric_coercion(name_dtype, extra_object_column):
+    numeric_names = name_dtype in {"int64", "float64", "Int64"}
+    names = [1, 2] if numeric_names else ["node1", "node2"]
+    frame = pandas.DataFrame(
+        {
+            "node_name": pandas.Series(names * 6, dtype=name_dtype),
+            "ncore_available": [2**60 + 1, 2**60 + 3] * 6,
+            "hc:mem_req": [32.5, float("nan")] * 6,
+        }
+    )
+    if extra_object_column:
+        frame["unused"] = "text"
+    frame.index = [7] * len(frame)
+    original = frame.copy(deep=True)
+    ordered = frame.sort_values(
+        by=["ncore_available", "hc:mem_req", "node_name"], ascending=[False, False, True]
+    )
+    expected = ", ".join(
+        stat_module._format_slurm_compact_node(
+            row["node_name"], row["ncore_available"], row["hc:mem_req"]
+        )
+        for _, row in ordered.iterrows()
+    )
+    assert (
+        stat_module._format_compact_top_nodes(
+            frame,
+            "ncore_available",
+            "hc:mem_req",
+            SimpleNamespace(ntop=len(frame), all_tiers=False),
+        )
+        == expected
+    )
+    pandas.testing.assert_frame_equal(frame, original)
+
+
+def test_compact_top_nodes_preserves_object_row_missing_name_inference():
+    frame = pandas.DataFrame(
+        {
+            "node_name": pandas.Series([True, pandas.NA] * 6, dtype="boolean"),
+            "ncore_available": pandas.Series(["8"] * 12, dtype="object"),
+            "hc:mem_req": pandas.Series([pandas.NA] * 12, dtype="Float64"),
+        }
+    )
+    ordered = frame.sort_values(
+        by=["ncore_available", "hc:mem_req", "node_name"], ascending=[False, False, True]
+    )
+    expected = ", ".join(
+        stat_module._format_slurm_compact_node(
+            row["node_name"], row["ncore_available"], row["hc:mem_req"]
+        )
+        for _, row in ordered.iterrows()
+    )
+    assert (
+        stat_module._format_compact_top_nodes(
+            frame,
+            "ncore_available",
+            "hc:mem_req",
+            SimpleNamespace(ntop=len(frame), all_tiers=True),
+        )
+        == expected
+    )
+
+
 def test_atomic_write_tsv_preserves_existing_permissions(tmp_path):
     target = tmp_path / "nodes.tsv"
     target.write_text("old\n", encoding="utf-8")
@@ -1585,3 +1650,86 @@ def test_get_df_qstat_handles_empty_later_iteration(monkeypatch):
     args = SimpleNamespace(stat_command="qstat -F", niter=2, example_file="")
     with pytest.raises(KFBatchCommandError, match="snapshot 2"):
         get_df(args)
+
+
+@pytest.mark.parametrize("memory", ["64G", "unknown"])
+@pytest.mark.parametrize("queue_dtype", ["object", "string", "category"])
+def test_slurm_launch_large_cpu_ties_keep_lexical_names_and_unknown_memory(memory, queue_dtype):
+    nodes = pandas.DataFrame(
+        {
+            "queue_name": ["main"] * 300,
+            "node_name": ["node2", "node10"] + ["znode"] * 298,
+            "status": [""] * 300,
+            "ncore_available": [8] * 300,
+            "hc:mem_req": [memory] * 300,
+        },
+        index=[2] * 300,
+    )
+    nodes["queue_name"] = nodes["queue_name"].astype(queue_dtype)
+    nodes.attrs = {"slurm_cpus_per_core": {"node10": 2}}
+    original = nodes.copy(deep=True)
+
+    out = get_slurm_launch_heuristic_df(nodes, None)
+
+    assert out.at[0, "top_node_name"] == "node10"
+    assert out.at[0, "recommended_cores"] == 8
+    if memory == "unknown":
+        assert pandas.isna(out.at[0, "recommended_mem_gib"])
+    else:
+        assert out.at[0, "recommended_mem_gib"] == 64.0
+    pandas.testing.assert_frame_equal(nodes, original, check_exact=True)
+    assert nodes.attrs == original.attrs
+
+
+def test_slurm_launch_large_queue_orders_cpu_then_known_memory_then_name():
+    nodes = pandas.DataFrame(
+        {
+            "queue_name": ["main"] * 300,
+            "node_name": ["node2", "node10", "node01", "unavailable"] + ["lower"] * 296,
+            "status": ["", "", "", "RESERVED"] + [""] * 296,
+            "ncore_available": [8, 8, 8, 128] + [7] * 296,
+            "hc:mem_req": ["32G", "32G", "unknown", "128G"] + ["1T"] * 296,
+        }
+    )
+
+    out = get_slurm_launch_heuristic_df(nodes, None)
+
+    assert out.at[0, "top_node_name"] == "node10"
+    assert out.at[0, "recommended_cores"] == 8
+    assert out.at[0, "recommended_mem_gib"] == 32.0
+
+
+@pytest.mark.parametrize("core_dtype", ["mixed", "category"])
+def test_slurm_launch_large_queue_keeps_nonnumeric_cpu_sort_order(core_dtype):
+    cores = [8, "9"] * 150
+    if core_dtype == "category":
+        cores = pandas.Categorical([8, 9] * 150, categories=[9, 8])
+    nodes = pandas.DataFrame(
+        {
+            "queue_name": ["main"] * 300,
+            "node_name": ["node01"] * 300,
+            "status": [""] * 300,
+            "ncore_available": cores,
+            "hc:mem_req": ["64G"] * 300,
+        }
+    )
+
+    out = get_slurm_launch_heuristic_df(nodes, None)
+
+    assert out.at[0, "recommended_cores"] == (9 if core_dtype == "mixed" else 8)
+
+
+def test_slurm_launch_large_queue_keeps_mixed_node_name_order():
+    nodes = pandas.DataFrame(
+        {
+            "queue_name": ["main"] * 300,
+            "node_name": ["node2", 2, "node1", 1] * 75,
+            "status": [""] * 300,
+            "ncore_available": [8] * 300,
+            "hc:mem_req": ["64G"] * 300,
+        }
+    )
+
+    out = get_slurm_launch_heuristic_df(nodes, None)
+
+    assert out.at[0, "top_node_name"] == "1"

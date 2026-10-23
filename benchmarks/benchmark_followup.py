@@ -19,7 +19,7 @@ from benchmarks.benchmark_parsers import (
     _uge_job_lines,
 )
 from benchmarks.benchmark_reports import _measure, _positive_int
-from kfbatch import batch_scope, render, stat
+from kfbatch import batch_scope, memory, render, stat
 
 CASES = (
     "users-slurm",
@@ -31,7 +31,17 @@ CASES = (
     "render-slurm",
     "render-uge",
     "top-nodes",
+    "top-ties",
+    "top-many",
     "launch-queues",
+    "launch-single",
+    "launch-jobs",
+    "launch-jobs-multi",
+    "slurm-summary",
+    "slurm-summary-unique",
+    "memory-unique",
+    "memory-repeated",
+    "memory-ge-unique",
     "squeue-repeated",
     "squeue-unique",
     "uge-array-repeated",
@@ -76,7 +86,41 @@ def _nodes(count, queues):
     return frame
 
 
+def _report_operation(name, args):
+    if name.startswith("memory-"):
+        values = pandas.Series(
+            ["64G", "128G"] * ((args.jobs + 1) // 2)
+            if name == "memory-repeated"
+            else [f"{i + 1}M" for i in range(args.jobs)]
+        ).iloc[: args.jobs]
+        convert = (
+            memory.grid_engine_memory_series_to_gib
+            if name == "memory-ge-unique"
+            else memory.memory_series_to_gib
+        )
+        return lambda: convert(values).to_frame()
+    if name.startswith("slurm-summary"):
+        jobs = _scope_jobs(args.jobs, args.users, "slurm")
+        jobs["task_count_estimated"] = False
+        if name.endswith("unique"):
+            jobs["state"] = [f"UNKNOWN_{i}" for i in range(args.jobs)]
+        return lambda: _printed(stat.print_queued_job_summary, jobs, "slurm", "user00000")
+    if name in {"launch-jobs", "launch-jobs-multi"}:
+        nodes = _nodes(8, 4)
+        nodes["ncore_available"] = 56
+        nodes["hc:mem_req"] = "64G"
+        partition = "part0000"
+        if name.endswith("multi"):
+            partition = "part0000,part0001,part0002,part0003"
+        jobs = stat.get_squeue_user_df(_slurm_job_lines(args.jobs)).assign(
+            user="current_user", partition=partition, req_mem="2Gn"
+        )
+        return lambda: stat.get_slurm_launch_heuristic_df(nodes, jobs, current_user="current_user")
+
+
 def _operation(name, args):
+    if name.startswith(("slurm-summary", "launch-jobs", "memory-")):
+        return _report_operation(name, args)
     if name.startswith(("users-", "one-user-", "totals-")):
         scheduler = name.rsplit("-", 1)[1]
         users = 1 if name.startswith("one-user-") else args.users
@@ -85,13 +129,28 @@ def _operation(name, args):
             return lambda: batch_scope.aggregate_jobs(jobs, scheduler)
         members = [f"user{i:05d}" for i in range(users + 2)]
         return lambda: _printed(batch_scope._print_user_breakdown, jobs, scheduler, members)
-    if name in {"render-slurm", "render-uge", "top-nodes", "launch-queues"}:
-        nodes = _nodes(args.nodes, 1 if name == "top-nodes" else args.queues)
-        if name == "launch-queues":
+    if name in {
+        "render-slurm",
+        "render-uge",
+        "top-nodes",
+        "top-ties",
+        "top-many",
+        "launch-queues",
+        "launch-single",
+    }:
+        single_queue = name.startswith("top-") or name == "launch-single"
+        nodes = _nodes(args.nodes, 1 if single_queue else args.queues)
+        if name.startswith("launch-"):
             return lambda: stat.get_slurm_launch_heuristic_df(nodes, None)
         nodes = stat.adjust_ram_unit(nodes)
-        options = SimpleNamespace(ntop=1, all_tiers=False, exclude_abnormal_node=True)
-        if name == "top-nodes":
+        options = SimpleNamespace(
+            ntop=min(25_000, args.nodes) if name == "top-many" else 1,
+            all_tiers=name == "top-ties",
+            exclude_abnormal_node=True,
+        )
+        if name.startswith("top-"):
+            if name == "top-ties":
+                nodes["ncore_available"] = 56
             # The renderer strips accounting attrs before selecting its top nodes.
             nodes.attrs = {}
             return lambda: render._format_compact_top_nodes(

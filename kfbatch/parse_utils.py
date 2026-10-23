@@ -3,18 +3,23 @@
 from functools import lru_cache
 
 
-def _map_repeated_strings(series, convert):
+def _map_repeated_strings(series, convert, *, exact_strings=False):
     """Cache repeated tokens for one conversion, with bounded memory.
 
     Sample across the input so mostly unique columns keep the direct path.
     Only strings enter the cache; other scalar types retain their own semantics.
+    Set exact_strings when string subclasses can customize the conversion.
     """
     if len(series) < 256:
         return series.map(convert)
     sample = series.iloc[:: max(len(series) // 128, 1)].iloc[:128].tolist()
+    if exact_strings and any(type(value) is not str for value in sample):
+        return series.map(convert)
     if not all(isinstance(value, str) for value in sample) or len(set(sample)) > 64:
         return series.map(convert)
     cached = lru_cache(maxsize=256)(convert)
+    if exact_strings:
+        return series.map(lambda value: cached(value) if type(value) is str else convert(value))
     return series.map(lambda value: cached(value) if isinstance(value, str) else convert(value))
 
 

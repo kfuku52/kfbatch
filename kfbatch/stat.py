@@ -829,7 +829,9 @@ def print_queued_job_summary(
             print("No jobs found in squeue output.")
             print("")
             return
-        state_codes = df_user["state"].fillna("").map(_normalize_slurm_job_state)
+        state_codes = _map_repeated_strings(
+            df_user["state"].fillna(""), _normalize_slurm_job_state, exact_strings=True
+        )
         is_running = state_codes.isin(SLURM_RUNNING_STATES)
         is_qwaiting = state_codes.isin(SLURM_PENDING_STATES)
         is_error = state_codes.isin(SLURM_ERROR_STATES)
@@ -1059,7 +1061,9 @@ def get_slurm_fairshare_rank_summary(df_job, df_share, current_user=""):
     pending_total = 0
     pending_missing = 0
     if (df_job is not None) and (df_job.shape[0] > 0) and ("user" in df_job.columns):
-        state_codes = df_job["state"].fillna("").map(_normalize_slurm_job_state)
+        state_codes = _map_repeated_strings(
+            df_job["state"].fillna(""), _normalize_slurm_job_state, exact_strings=True
+        )
         pending_columns = ["user", "account"] if "account" in df_job.columns else ["user"]
         df_pending = df_job.loc[state_codes.isin(SLURM_PENDING_STATES), pending_columns]
         pending_rows, pending_missing = _pending_fairshare_rows(df_pending, df_share, df_ranked)
@@ -1157,7 +1161,9 @@ def _index_slurm_rows_by_partition(frame):
     if frame is None or frame.shape[0] == 0 or "partition" not in frame.columns:
         return {}
     expanded = frame.copy()
-    expanded["_queue_name"] = expanded["partition"].map(_split_slurm_partition_field)
+    expanded["_queue_name"] = _map_repeated_strings(
+        expanded["partition"], _split_slurm_partition_field, exact_strings=True
+    )
     expanded = expanded.explode("_queue_name")
     expanded = expanded.loc[expanded["_queue_name"].notna(), :]
     return {
@@ -1301,7 +1307,9 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=""
         and df_job.shape[0] > 0
         and {"state", "user", "partition"}.issubset(df_job.columns)
     ):
-        state_codes = df_job["state"].fillna("").map(_normalize_slurm_job_state)
+        state_codes = _map_repeated_strings(
+            df_job["state"].fillna(""), _normalize_slurm_job_state, exact_strings=True
+        )
         user_pending = df_job.loc[
             (df_job["user"].fillna("") == current_user) & state_codes.isin(SLURM_PENDING_STATES),
             :,
@@ -1341,6 +1349,14 @@ def get_slurm_launch_heuristic_df(df_node, df_job, df_prio=None, current_user=""
                 }
             )
             continue
+        if df_queue.shape[0] >= 256 and pandas.api.types.is_numeric_dtype(
+            df_queue["ncore_available"].dtype
+        ):
+            # Only maximum-CPU nodes can win; parse and sort those candidates.
+            cores = df_queue["ncore_available"]
+            candidates = cores == cores.max()
+            if candidates.any() and not candidates.all():
+                df_queue = df_queue.loc[candidates, :].copy()
         df_queue["available_mem_gb"] = _memory_series_to_gb(df_queue["hc:mem_req"])
         df_queue = df_queue.sort_values(
             by=["ncore_available", "available_mem_gb", "node_name"], ascending=[False, False, True]

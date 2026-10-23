@@ -93,13 +93,30 @@ def _format_compact_top_nodes(df_nodes, primary_col, secondary_col, args):
             selected = ordered.loc[ordered[primary_col] >= threshold, :]
     else:
         selected = ordered.iloc[:limit, :]
+    if (
+        selected.shape[0] < 10
+        or selected["ncore_available"].dtype.kind not in "biuf"
+        or selected["ncore_available"].hasnans
+    ):
+        # Object/string and missing cores can trigger additional dtype inference
+        # inside iterrows' Series constructor, including NA-to-nan conversion.
+        # Small selections do not amortize the array/column-position setup.
+        return ", ".join(
+            _format_slurm_compact_node(row["node_name"], row["ncore_available"], row["hc:mem_req"])
+            for _, row in selected.iterrows()
+        )
+    node_position = selected.columns.get_loc("node_name")
+    core_position = selected.columns.get_loc("ncore_available")
+    memory_position = selected.columns.get_loc("hc:mem_req")
+    # Keep iterrows' common row dtype (including numeric upcasting), without
+    # allocating a Series and performing three label lookups per selected node.
     return ", ".join(
         _format_slurm_compact_node(
-            row["node_name"],
-            row["ncore_available"],
-            row["hc:mem_req"],
+            row[node_position],
+            row[core_position],
+            row[memory_position],
         )
-        for _, row in selected.iterrows()
+        for row in selected.to_numpy()
     )
 
 

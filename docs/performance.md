@@ -326,3 +326,111 @@ tests with 87.40% branch-inclusive coverage. Static checks (`ruff check`,
 also matched all 16 before/after checksums. Package builds and network dependency
 audits were outside this local-only change; no version bump or publication was
 performed.
+
+
+## 2026-10-23 second local follow-up
+
+Baseline: `05ae68e5c81b709b74bfa4d2f52f42437cbb2ef8`. Six further proposals
+were screened in separate subagent source copies; five were adopted. No scheduler
+commands, units, output schemas, or site defaults were changed.
+
+| # | Proposal | Decision |
+| --- | --- | --- |
+| 1 | Avoid a pandas Series for every displayed top-node row | Adopt. At least ten selected rows with known numeric CPU counts use a common-dtype NumPy row array. Small selections, object/string CPU counts and missing CPU counts retain `iterrows`, preserving its row-type inference. |
+| 2 | Reduce launch-ceiling sorting and RAM parsing | Adopt. Numeric queues with at least 256 normal rows first retain maximum-CPU candidates, then use the existing RAM conversion and three-key sort. All-tied, unknown-CPU and nonnumeric cases keep the original ordering behavior. |
+| 3 | Reuse repeated partition-field splitting | Adopt. Use the existing sampled, bounded per-call string mapper with an explicit built-in-string mode. Repeated lists are reused before exploding queue rows; output rows and association duplicates remain unchanged. |
+| 4 | Precompile the Slurm header regex | Reject. Initial isolated gains shrank to 0.98% for repeated-memory jobs and 0.83% for unique-memory jobs in five alternating comparisons. The small difference did not establish a reliable overall benefit. |
+| 5 | Precompile the unchanged memory regex | Adopt. Use the identical expression with `Pattern.fullmatch`; the measurable benefit is unique-token memory-column conversion. Full squeue parsing and repeated-token columns showed no consistent improvement in the final sweep. |
+| 6 | Reuse repeated Slurm state normalization | Adopt. Apply the mapper at the job-summary, FairShare and launch entry points. Only built-in strings enter the new cache, preserving non-string/string-subclass conversion behavior. |
+
+The mapper retains its previous default behavior for existing memory/time
+callers. Its new `exact_strings=True` mode is explicit, per call and limited to
+256 entries. Samples with many distinct values or unsuitable types keep direct
+conversion; no global cache was introduced. Array-row rendering preserves the
+common dtype of all selected columns instead of changing numeric coercion by
+selecting only three columns.
+
+Measured with Python 3.14.7, pandas 3.1.0 and macOS 27.0.1 arm64. Inputs were
+constructed before measurement, with one warmup and seven repetitions per
+operation. Baseline and integrated timing suites ran sequentially after subagent
+work stopped. Allocation tracing used separate invocations. The host was still
+shared, without CPU affinity or frequency control; compare CPU ranges and avoid
+interpreting the wall medians as guaranteed CLI latency improvements.
+
+The top-node cases use 50,000 distinct nodes, selecting all primary ties or
+25,000 rows. Launch cases use either 50,000 node instances over one/100 queues,
+or 100,000 priority-pending jobs over eight node instances/four queues. The
+multi-partition case places each job in four candidate queues. Summary and
+memory-column cases use 100,000 rows. Existing synthetic node generators retain
+physical-alias consistency and distinct queue/node keys.
+
+CPU and wall values are seconds; CPU brackets show min–max of seven samples.
+
+| Operation | Before CPU [range] | After CPU [range] | CPU ratio | Wall median before → after |
+| --- | --- | --- | --- | --- |
+| top-ties | 0.678192 [0.625174–0.810793] | 0.059477 [0.056738–0.070812] | 11.40× | 1.880191 → 0.074824 |
+| top-many | 0.390950 [0.351324–0.423213] | 0.043728 [0.038544–0.054366] | 8.94× | 0.698162 → 0.074988 |
+| top-nodes | 0.002194 [0.001891–0.002866] | 0.002410 [0.002173–0.003865] | 0.91× | 0.002222 → 0.002416 |
+| launch-single | 0.056683 [0.052851–0.064743] | 0.018489 [0.017926–0.020311] | 3.07× | 0.082843 → 0.020147 |
+| launch-queues | 0.239212 [0.223100–0.249707] | 0.125679 [0.102742–0.129949] | 1.90× | 0.881018 → 0.200525 |
+| launch-jobs | 0.280943 [0.275349–0.303924] | 0.250193 [0.235464–0.263859] | 1.12× | 0.397539 → 0.679505 |
+| launch-jobs-multi | 1.013460 [0.960166–1.062230] | 0.807533 [0.774624–0.964370] | 1.26× | 1.856221 → 1.502717 |
+| slurm-summary | 0.075076 [0.062616–0.083920] | 0.024787 [0.023569–0.026134] | 3.03× | 0.115802 → 0.032122 |
+| slurm-summary-unique | 0.079592 [0.076481–0.088062] | 0.069922 [0.066903–0.085162] | 1.14× | 0.164279 → 0.085184 |
+| squeue-repeated | 0.273013 [0.252164–0.296412] | 0.266316 [0.257810–0.272715] | 1.03× | 0.624666 → 0.326202 |
+| squeue-unique | 0.408161 [0.398763–0.468396] | 0.411861 [0.362578–0.443301] | 0.99× | 0.842776 → 1.025526 |
+| memory-unique | 0.108300 [0.102698–0.118989] | 0.097763 [0.088868–0.105609] | 1.11× | 0.146377 → 0.381825 |
+| memory-repeated | 0.018295 [0.017343–0.021766] | 0.019023 [0.017418–0.021462] | 0.96× | 0.019603 → 0.027643 |
+| memory-ge-unique | 0.112871 [0.098852–0.121997] | 0.089912 [0.082626–0.095292] | 1.26× | 0.270152 → 0.197957 |
+
+| Operation | Before peak Python allocation | After |
+| --- | --- | --- |
+| top-ties | 18.70MiB | 18.69MiB |
+| launch-single | 12.84MiB | 7.39MiB |
+| launch-jobs-multi | 142.92MiB | 120.12MiB |
+| slurm-summary | 6.80MiB | 4.78MiB |
+| memory-ge-unique | 7.83MiB | 7.83MiB |
+
+Peaks exclude prebuilt inputs and are not process RSS. The additional working
+sets for partition lists and state normalization shrink; rendering still needs
+the selected output text. Ordinary top1 and repeated-memory timings have
+overlapping ranges and no improvement is claimed. Unique-state inputs retain
+direct normalization, so their apparent timing gain is not attributed to caching.
+The full unique-memory squeue case was effectively unchanged; the earlier audit's
+unique-memory overhead is not claimed to have been eliminated.
+
+All 14 large-workload and 26 small-workload output checksums matched before/after,
+including DataFrame values, column/index order, dtypes and attrs. Individual
+checks included 12,160 row-rendering comparisons, 1,252 launch comparisons and
+166,882 memory-conversion comparisons. An independent combined review matched
+192 full stdout cases, 33 launch DataFrames and three existing exception paths,
+with 460 input/attrs nonmutation checks per implementation. Regression tests
+cover numeric coercion, missing values, name/queue ordering and late string
+subclasses with conversion side effects.
+
+Reproduce selected final workloads in CONTRIBUTING's activated environment:
+
+```bash
+python -m benchmarks.benchmark_followup --case top-ties --case top-many --case launch-single --case launch-jobs-multi --case slurm-summary --case memory-ge-unique --repeats 7 --skip-memory
+python -m benchmarks.benchmark_followup --case top-ties --case launch-single --case launch-jobs-multi --case slurm-summary --case memory-ge-unique --repeats 1
+
+kfbatch_round2_base=$(mktemp -d)
+git archive 05ae68e5c81b709b74bfa4d2f52f42437cbb2ef8 | tar -x -C "$kfbatch_round2_base"
+cp benchmarks/benchmark_followup.py "$kfbatch_round2_base/benchmarks/"
+(
+  cd "$kfbatch_round2_base"
+  python -m benchmarks.benchmark_followup --case top-ties --case top-many --case launch-single --case launch-jobs-multi --case slurm-summary --case memory-ge-unique --repeats 7 --skip-memory
+)
+```
+
+Select the other recorded operations with repeated `--case` options. Small-input
+checks used `--jobs 100 --users 5 --nodes 100 --queues 5 --qstat-nodes 10`.
+Use identical arguments, interpreter and dependency versions at both revisions.
+Full Python/minimum-pandas CI, live scheduler/SSH/site quota checks, package builds
+and network dependency audits were not run for this local-only change.
+
+Verification: the fixture smoke selection passed 42 tests; the full
+`python -m pytest --cov=kfbatch --cov-branch` run passed 417 tests with 87.73%
+branch-inclusive coverage. Static checks (`ruff check`, `ruff format --check`,
+`mypy`, and `bandit`) and `git diff --check` passed. This remains a local commit
+with no version bump or publication.
