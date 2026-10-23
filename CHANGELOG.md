@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.16] - 2026-10-23
+
+### Changed
+
+- Reuse repeated job states, partition fields, memory validation, and Grid Engine
+  text array ranges with bounded per-call caches for large scheduler reports.
+- Index queue rows once for compact tables and Slurm launch ceilings, and convert
+  node memory only for maximum-CPU launch candidates in large queues.
+- Select top-node candidates before sorting and format large selections without
+  per-row Series creation, preserving ties, numeric coercion, and display order.
+- Skip unused Grid Engine resource attributes earlier and precompile the unchanged
+  memory expression for unique-token column conversion.
+- Add synthetic benchmarks, allocation measurements, and compatibility regressions
+  for report values, metadata, missing data, and conversion side effects.
+
 ## [0.4.15] - 2026-10-15
 
 ### Changed
