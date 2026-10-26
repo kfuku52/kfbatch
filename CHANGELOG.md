@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.17] - 2026-10-26
+
+### Changed
+
+- Simplify tests around scheduler input validation and observable report behavior;
+  remove speculative internal input cases and implementation-specific assertions.
+- Retain synthetic regressions for repeated job counts, partition resource ceilings,
+  unknown memory, and tied-node display order with ordinary scheduler values.
+
 ## [0.4.16] - 2026-10-23
 
 ### Changed

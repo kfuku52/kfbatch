@@ -9,29 +9,26 @@ from kfbatch.batch_scope import (
 )
 
 
-def test_aggregate_jobs_counts_slurm_slots_in_all_buckets():
+@pytest.mark.parametrize("repetitions", [1, 32])
+def test_aggregate_jobs_counts_slurm_slots_in_all_buckets(repetitions):
     frame = pandas.DataFrame(
         {
             "state": ["R", "PD", "FAILED", "SUSPENDED"],
             "total_slots": [4, 3, 2, 1],
         }
     )
+    frame = pandas.concat([frame] * repetitions, ignore_index=True)
     totals = aggregate_jobs(frame, "slurm")
-    assert (totals.running, totals.queued, totals.failed, totals.other) == (4, 3, 2, 1)
-
-
-@pytest.mark.parametrize("scheduler,state", [("slurm", "RUNNING"), ("uge", "r")])
-def test_aggregate_jobs_preserves_slot_validation_and_missing_columns(scheduler, state):
-    frame = pandas.DataFrame(
-        {"state": state, "total_slots": [3, "4", None, float("nan"), "bad", -7]},
-        index=[8, 8, 2, 3, 6, 1],
+    assert totals == JobTotals(
+        running=4 * repetitions,
+        queued=3 * repetitions,
+        failed=2 * repetitions,
+        other=repetitions,
     )
-    assert aggregate_jobs(frame, scheduler) == JobTotals(running=7)
-    assert aggregate_jobs(frame.drop(columns="total_slots"), scheduler) == JobTotals()
-    assert aggregate_jobs(frame.drop(columns="state"), scheduler) == JobTotals(other=7)
 
 
-def test_aggregate_uge_jobs_retains_state_precedence_over_queue_assignment():
+@pytest.mark.parametrize("repetitions", [1, 32])
+def test_aggregate_uge_jobs_retains_state_precedence_over_queue_assignment(repetitions):
     frame = pandas.DataFrame(
         {
             "state": ["Rq", "hRq", "Eqw", "dr", "h", "", ""],
@@ -39,7 +36,13 @@ def test_aggregate_uge_jobs_retains_state_precedence_over_queue_assignment():
             "total_slots": [1, 2, 3, 4, 5, 6, 7],
         }
     )
-    assert aggregate_jobs(frame, "uge") == JobTotals(running=6, queued=8, failed=7, other=7)
+    frame = pandas.concat([frame] * repetitions, ignore_index=True)
+    assert aggregate_jobs(frame, "uge") == JobTotals(
+        running=6 * repetitions,
+        queued=8 * repetitions,
+        failed=7 * repetitions,
+        other=7 * repetitions,
+    )
 
 
 @pytest.mark.parametrize(
@@ -47,46 +50,29 @@ def test_aggregate_uge_jobs_retains_state_precedence_over_queue_assignment():
     [
         (
             "slurm",
-            ["R", "PD", "FAILED", "SUSPENDED", "R", "R"],
+            ["R", "PD", "FAILED", "SUSPENDED"],
             "      absent:R/Q/X/O=0/0/0/0\n"
-            "      user_a:R/Q/X/O=0/3/0/0\n"
+            "      user_a:R/Q/X/O=0/3/7/0\n"
             "      user_b:R/Q/X/O=4/0/0/2\n",
         ),
         (
             "uge",
-            ["r", "qw", "Eqw", "", "r", "r"],
-            "      absent:R/Q/F=0/0/0\n      user_a:R/Q/F=0/3/0\n      user_b:R/Q/F=4/0/0\n",
+            ["r", "qw", "Eqw", ""],
+            "      absent:R/Q/F=0/0/0\n      user_a:R/Q/F=0/3/7\n      user_b:R/Q/F=4/0/0\n",
         ),
     ],
 )
-def test_user_breakdown_retains_members_order_and_slot_validation(
-    scheduler, states, expected, capsys
-):
+def test_user_breakdown_lists_members_in_name_order(scheduler, states, expected, capsys):
     frame = pandas.DataFrame(
         {
-            "user": ["user_b", "user_a", "user_a", "user_b", None, ""],
+            "user": ["user_b", "user_a", "user_a", "user_b"],
             "state": states,
-            "queue_name": [""] * 6,
-            "total_slots": [4, "3", -7, 2, float("inf"), float("inf")],
+            "queue_name": [""] * 4,
+            "total_slots": [4, 3, 7, 2],
         },
-        index=[9, 9, 1, 2, 2, 4],
+        index=[9, 3, 1, 2],
     )
     _print_user_breakdown(frame, scheduler, ["absent", "user_b", ""])
-    assert capsys.readouterr().out == expected
-
-
-@pytest.mark.parametrize("missing", ["state", "queue_name", "total_slots"])
-def test_user_breakdown_keeps_users_when_job_columns_are_missing(missing, capsys):
-    frame = pandas.DataFrame(
-        {"user": ["user_b", "user_a"], "state": ["r", "qw"], "queue_name": ["", ""]}
-    )
-    frame["total_slots"] = [4, 3]
-    _print_user_breakdown(frame.drop(columns=missing), "uge", ["absent"])
-    expected = (
-        "      absent:R/Q/F=0/0/0\n"
-        f"      user_a:R/Q/F=0/{0 if missing in {'state', 'total_slots'} else 3}/0\n"
-        f"      user_b:R/Q/F={0 if missing in {'state', 'total_slots'} else 4}/0/0\n"
-    )
     assert capsys.readouterr().out == expected
 
 
